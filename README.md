@@ -58,7 +58,7 @@ To launch both the NestJS backend (with mediasoup worker compilation) and the Re
 
 ```bash
 # 1. Build and start the containers
-docker-compose up --build -d
+docker compose up --build -d
 
 # 2. Access the application
 # Frontend: http://localhost:3000
