@@ -14,7 +14,7 @@ export interface Room {
   name: string;
   controllerId: string;
   isLocked: boolean;
-  participants: Map<string, Participant>;
+  participants: Record<string, Participant>;
   turnState: 'idle' | 'client_speaking' | 'avatar_speaking';
   activeSpeakerId: string | null;
 }
@@ -30,7 +30,7 @@ export class RoomService {
         name: name || `Room ${roomId}`,
         controllerId: '',
         isLocked: false,
-        participants: new Map(),
+        participants: {},
         turnState: 'idle',
         activeSpeakerId: null,
       });
@@ -56,7 +56,7 @@ export class RoomService {
       joinedAt: Date.now(),
     };
 
-    room.participants.set(participantId, participant);
+    room.participants[participantId] = participant;
     return { room, participant };
   }
 
@@ -64,15 +64,17 @@ export class RoomService {
     const room = this.rooms.get(roomId);
     if (!room) return;
 
-    room.participants.delete(participantId);
+    delete room.participants[participantId];
 
     // Reassign controller if current controller left
     if (room.controllerId === participantId) {
-      const firstRemaining = room.participants.keys().next().value;
-      if (firstRemaining) {
+      const remainingIds = Object.keys(room.participants);
+      if (remainingIds.length > 0) {
+        const firstRemaining = remainingIds[0];
         room.controllerId = firstRemaining;
-        const p = room.participants.get(firstRemaining);
-        if (p) p.role = 'controller';
+        if (room.participants[firstRemaining]) {
+          room.participants[firstRemaining].role = 'controller';
+        }
       } else {
         room.controllerId = '';
       }
@@ -93,13 +95,13 @@ export class RoomService {
 
     switch (action) {
       case 'mute':
-        if (targetId && room.participants.has(targetId)) {
-          room.participants.get(targetId)!.isMuted = true;
+        if (targetId && room.participants[targetId]) {
+          room.participants[targetId].isMuted = true;
         }
         break;
       case 'unmute':
-        if (targetId && room.participants.has(targetId)) {
-          room.participants.get(targetId)!.isMuted = false;
+        if (targetId && room.participants[targetId]) {
+          room.participants[targetId].isMuted = false;
         }
         break;
       case 'lock_room':
@@ -109,10 +111,15 @@ export class RoomService {
         room.isLocked = false;
         break;
       case 'make_controller':
-        if (targetId && room.participants.has(targetId)) {
-          room.participants.get(requesterId)!.role = 'participant';
-          room.participants.get(targetId)!.role = 'controller';
+        if (targetId && room.participants[targetId]) {
+          room.participants[requesterId].role = 'participant';
+          room.participants[targetId].role = 'controller';
           room.controllerId = targetId;
+        }
+        break;
+      case 'kick':
+        if (targetId && room.participants[targetId]) {
+          delete room.participants[targetId];
         }
         break;
     }
@@ -121,5 +128,9 @@ export class RoomService {
 
   getRoom(roomId: string): Room | undefined {
     return this.rooms.get(roomId);
+  }
+
+  getAllRooms(): Room[] {
+    return Array.from(this.rooms.values());
   }
 }

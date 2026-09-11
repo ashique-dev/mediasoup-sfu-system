@@ -1,8 +1,8 @@
 import type { types } from 'mediasoup';
-import os from 'os';
+import * as os from 'os';
 
 export const mediasoupConfig = {
-  numWorkers: Object.keys(os.cpus()).length,
+  numWorkers: Math.max(Object.keys(os.cpus?.() || {}).length || 1, 1),
   worker: {
     logLevel: 'debug',
     logTags: [

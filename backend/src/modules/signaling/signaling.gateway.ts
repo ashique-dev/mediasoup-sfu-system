@@ -1,13 +1,7 @@
-import {
-  WebSocketGateway,
-  SubscribeMessage,
-  WebSocketServer,
-  OnGatewayConnection,
-  OnGatewayDisconnect,
-  MessageBody,
-  ConnectedSocket,
-} from '@nestjs/websockets';
-import { Server, Socket } from 'socket.io';
+import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { HttpAdapterHost } from '@nestjs/core';
+import { WebSocketServer, WebSocket } from 'ws';
+import { v4 as uuidv4 } from 'uuid';
 import { SfuService } from '../sfu/sfu.service';
 import { RoomService } from '../room/room.service';
 
@@ -16,144 +10,358 @@ const AVATAR_RESPONSES = [
   "Understood! Your previous speaking turn was captured successfully. The RTP packet stream shows zero packet loss.",
   "Acknowledged. I have recorded your speech in the half-duplex buffer. You may take your turn again now.",
   "Transmission received loud and clear. SFU peer connection endpoints are synchronized.",
+  "Telemetry confirms steady bitrate on WebRtcTransport. The floor is returned to you.",
 ];
 
-@WebSocketGateway({
-  cors: { origin: '*' },
-  path: '/ws',
-})
-export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnect {
-  @WebSocketServer()
-  server: Server;
+interface ConnectedClient {
+  ws: WebSocket;
+  participantId?: string;
+  roomId?: string;
+}
+
+@Injectable()
+export class SignalingGateway implements OnModuleInit, OnModuleDestroy {
+  private wss: WebSocketServer | null = null;
+  private clients = new Map<string, ConnectedClient>();
 
   constructor(
+    private readonly adapterHost: HttpAdapterHost,
     private readonly sfuService: SfuService,
     private readonly roomService: RoomService,
   ) {}
 
-  handleConnection(client: Socket) {
-    console.log(`[NestJS SFU] Client connected: ${client.id}`);
+  onModuleInit() {
+    const server = this.adapterHost.httpAdapter.getHttpServer();
+    this.wss = new WebSocketServer({ server, path: '/ws' });
+
+    console.log('[NestJS SFU] WebSocket Signaling Gateway mounted on /ws');
+
+    this.wss.on('connection', (ws: WebSocket) => {
+      const clientId = uuidv4();
+      this.clients.set(clientId, { ws });
+
+      console.log(`[NestJS SFU] Client connected: ${clientId} (Total: ${this.clients.size})`);
+
+      ws.on('message', async (data: Buffer | string) => {
+        try {
+          const message = JSON.parse(data.toString());
+          await this.handleMessage(clientId, ws, message);
+        } catch (err) {
+          console.error(`[NestJS SFU] Error processing message from ${clientId}:`, err);
+        }
+      });
+
+      ws.on('close', () => {
+        this.handleDisconnect(clientId);
+      });
+
+      ws.on('error', (err) => {
+        console.error(`[NestJS SFU] WebSocket error on client ${clientId}:`, err);
+      });
+    });
   }
 
-  handleDisconnect(client: Socket) {
-    console.log(`[NestJS SFU] Client disconnected: ${client.id}`);
-    const roomId = (client as any).roomId;
-    if (roomId) {
-      this.roomService.leave(roomId, client.id);
-      this.server.to(roomId).emit('participant_left', { participantId: client.id });
+  onModuleDestroy() {
+    if (this.wss) {
+      this.wss.close();
     }
   }
 
-  @SubscribeMessage('get_router_capabilities')
-  async handleGetCapabilities(@MessageBody() data: { roomId: string }) {
-    const caps = await this.sfuService.getRouterRtpCapabilities(data.roomId || 'default');
-    return { rtpCapabilities: caps };
+  private reply(
+    ws: WebSocket,
+    responseType: string,
+    payload: any,
+    requestId?: string,
+    roomId?: string,
+    clientId?: string,
+  ) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: responseType,
+          requestId,
+          roomId,
+          senderId: clientId,
+          payload,
+        }),
+      );
+    }
   }
 
-  @SubscribeMessage('join_room')
-  handleJoinRoom(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() payload: { roomId: string; name: string; role: string },
-  ) {
-    (client as any).roomId = payload.roomId;
-    client.join(payload.roomId);
-
-    const { room, participant } = this.roomService.join(
-      payload.roomId,
-      client.id,
-      payload.name,
-      payload.role,
-    );
-
-    client.broadcast.to(payload.roomId).emit('participant_joined', { participant });
-
-    return {
-      participantId: client.id,
-      role: participant.role,
-      room: {
-        id: room.id,
-        name: room.name,
-        controllerId: room.controllerId,
-        isLocked: room.isLocked,
-        turnState: room.turnState,
-      },
-    };
-  }
-
-  @SubscribeMessage('create_webrtc_transport')
-  async handleCreateTransport(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() payload: { roomId: string },
-  ) {
-    return await this.sfuService.createWebRtcTransport(payload.roomId);
-  }
-
-  @SubscribeMessage('connect_webrtc_transport')
-  async handleConnectTransport(
-    @MessageBody() payload: { transportId: string; dtlsParameters: any },
-  ) {
-    await this.sfuService.connectTransport(payload.transportId, payload.dtlsParameters);
-    return { connected: true };
-  }
-
-  @SubscribeMessage('produce')
-  async handleProduce(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() payload: { transportId: string; kind: 'audio' | 'video'; rtpParameters: any },
-  ) {
-    const producerId = await this.sfuService.produce(
-      payload.transportId,
-      payload.kind,
-      payload.rtpParameters,
-      { participantId: client.id },
-    );
-    return { id: producerId };
-  }
-
-  // Half-duplex: Client declares speech is over
-  @SubscribeMessage('turn_over')
-  handleTurnOver(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() payload: { roomId: string },
-  ) {
-    const roomId = payload.roomId || (client as any).roomId;
-    this.roomService.setTurnState(roomId, 'avatar_speaking', 'avatar');
-
-    this.server.to(roomId).emit('turn_state_changed', {
-      turnState: 'avatar_speaking',
-      activeSpeakerId: 'avatar',
-      message: "Client speech completed. Avatar's turn has commenced.",
-    });
-
-    // Simulate streaming text speech below avatar
-    const response = AVATAR_RESPONSES[Math.floor(Math.random() * AVATAR_RESPONSES.length)];
-    const words = response.split(' ');
-    let currentIdx = 0;
-    let accumulated = '';
-
-    const interval = setInterval(() => {
-      if (currentIdx < words.length) {
-        accumulated += words[currentIdx] + ' ';
-        currentIdx++;
-        this.server.to(roomId).emit('avatar_speech_chunk', {
-          fullText: accumulated,
-          progress: currentIdx / words.length,
-        });
-      } else {
-        clearInterval(interval);
-        setTimeout(() => {
-          this.roomService.setTurnState(roomId, 'idle', null);
-          this.server.to(roomId).emit('avatar_speech_complete', {
-            completedText: accumulated,
-          });
-          this.server.to(roomId).emit('turn_state_changed', {
-            turnState: 'idle',
-            message: 'Avatar speech finished. Client may now start transmitting again.',
-          });
-        }, 500);
+  private broadcastToRoom(roomId: string, message: any, excludeClientId?: string) {
+    const dataStr = JSON.stringify(message);
+    for (const [id, client] of this.clients.entries()) {
+      if (client.roomId === roomId && id !== excludeClientId && client.ws.readyState === WebSocket.OPEN) {
+        client.ws.send(dataStr);
       }
-    }, 150);
+    }
+  }
 
-    return { success: true };
+  private async handleMessage(clientId: string, ws: WebSocket, message: any) {
+    const { type, roomId, payload, requestId } = message;
+
+    const respond = (resType: string, resPayload: any) => {
+      this.reply(ws, resType, resPayload, requestId, roomId, clientId);
+    };
+
+    switch (type) {
+      case 'get_router_capabilities': {
+        const caps = await this.sfuService.getRouterRtpCapabilities(roomId || 'default');
+        respond('router_capabilities', { rtpCapabilities: caps });
+        break;
+      }
+
+      case 'join_room': {
+        const targetRoomId = roomId || 'default';
+        const roomName = payload?.roomName;
+        const requestedRole = payload?.role || 'participant';
+        const participantName = payload?.name || `User_${clientId.substring(0, 4)}`;
+
+        const existingRoom = this.roomService.getRoom(targetRoomId);
+        if (existingRoom && existingRoom.isLocked && requestedRole !== 'controller') {
+          respond('error', { message: 'Room is currently locked by the meeting controller.' });
+          return;
+        }
+
+        const { room, participant } = this.roomService.join(
+          targetRoomId,
+          clientId,
+          participantName,
+          requestedRole,
+        );
+
+        const clientData = this.clients.get(clientId);
+        if (clientData) {
+          clientData.roomId = room.id;
+          clientData.participantId = clientId;
+        }
+
+        respond('room_joined', {
+          participantId: clientId,
+          role: participant.role,
+          room: {
+            id: room.id,
+            name: room.name,
+            controllerId: room.controllerId,
+            isLocked: room.isLocked,
+            participants: room.participants,
+            turnState: room.turnState,
+            activeSpeakerId: room.activeSpeakerId,
+          },
+        });
+
+        this.broadcastToRoom(
+          room.id,
+          {
+            type: 'participant_joined',
+            roomId: room.id,
+            payload: { participant },
+          },
+          clientId,
+        );
+        break;
+      }
+
+      case 'create_webrtc_transport': {
+        const transportOptions = await this.sfuService.createWebRtcTransport(roomId || 'default');
+        respond('webrtc_transport_created', transportOptions);
+        break;
+      }
+
+      case 'connect_webrtc_transport': {
+        await this.sfuService.connectTransport(payload.transportId, payload.dtlsParameters);
+        respond('webrtc_transport_connected', { connected: true });
+        break;
+      }
+
+      case 'produce': {
+        const producerId = await this.sfuService.produce(
+          payload.transportId,
+          payload.kind,
+          payload.rtpParameters,
+          { participantId: clientId },
+        );
+        respond('produced', { id: producerId });
+
+        this.broadcastToRoom(
+          roomId,
+          {
+            type: 'new_producer',
+            roomId,
+            payload: { producerId, participantId: clientId, kind: payload.kind },
+          },
+          clientId,
+        );
+        break;
+      }
+
+      case 'consume': {
+        try {
+          const consumerOptions = await this.sfuService.consume(
+            roomId || 'default',
+            payload.transportId,
+            payload.producerId,
+            payload.rtpCapabilities,
+          );
+          respond('consumed', consumerOptions);
+        } catch (err: any) {
+          respond('error', { message: err.message || 'Failed to consume' });
+        }
+        break;
+      }
+
+      case 'turn_start': {
+        const targetRoomId = roomId || 'default';
+        const room = this.roomService.getOrCreateRoom(targetRoomId);
+
+        if (room.turnState === 'avatar_speaking') {
+          respond('error', { message: 'Half-duplex lock: Avatar is currently speaking. Please wait.' });
+          return;
+        }
+
+        this.roomService.setTurnState(targetRoomId, 'client_speaking', clientId);
+
+        this.broadcastToRoom(targetRoomId, {
+          type: 'turn_state_changed',
+          roomId: targetRoomId,
+          payload: {
+            turnState: 'client_speaking',
+            activeSpeakerId: clientId,
+            message: 'Client has initiated speech transmission.',
+          },
+        });
+        break;
+      }
+
+      case 'turn_over': {
+        const targetRoomId = roomId || 'default';
+        this.roomService.setTurnState(targetRoomId, 'avatar_speaking', 'avatar');
+
+        this.broadcastToRoom(targetRoomId, {
+          type: 'turn_state_changed',
+          roomId: targetRoomId,
+          payload: {
+            turnState: 'avatar_speaking',
+            activeSpeakerId: 'avatar',
+            message: "Client speech completed. Avatar's turn has commenced.",
+          },
+        });
+
+        // Simulate streaming text speech below avatar
+        const selectedSpeech = AVATAR_RESPONSES[Math.floor(Math.random() * AVATAR_RESPONSES.length)];
+        const words = selectedSpeech.split(' ');
+        let currentIdx = 0;
+        let accumulatedText = '';
+
+        const speechInterval = setInterval(() => {
+          if (currentIdx < words.length) {
+            const chunk = words[currentIdx] + ' ';
+            accumulatedText += chunk;
+            currentIdx++;
+
+            this.broadcastToRoom(targetRoomId, {
+              type: 'avatar_speech_chunk',
+              roomId: targetRoomId,
+              payload: {
+                chunk,
+                fullText: accumulatedText,
+                progress: currentIdx / words.length,
+              },
+            });
+          } else {
+            clearInterval(speechInterval);
+            setTimeout(() => {
+              this.roomService.setTurnState(targetRoomId, 'idle', null);
+
+              this.broadcastToRoom(targetRoomId, {
+                type: 'avatar_speech_complete',
+                roomId: targetRoomId,
+                payload: {
+                  completedText: accumulatedText,
+                  nextSpeakerAllowed: 'client',
+                },
+              });
+
+              this.broadcastToRoom(targetRoomId, {
+                type: 'turn_state_changed',
+                roomId: targetRoomId,
+                payload: {
+                  turnState: 'idle',
+                  activeSpeakerId: null,
+                  message: 'Avatar speech finished. Client may now start transmitting again.',
+                },
+              });
+            }, 500);
+          }
+        }, 150);
+        break;
+      }
+
+      case 'controller_action': {
+        const targetRoomId = roomId || 'default';
+        const room = this.roomService.getRoom(targetRoomId);
+
+        if (!room || room.controllerId !== clientId) {
+          respond('error', { message: 'Authorization Failed: Only Meeting Controllers can perform this action.' });
+          return;
+        }
+
+        const { action, targetParticipantId } = payload;
+        this.roomService.executeControllerAction(targetRoomId, clientId, action, targetParticipantId);
+
+        if (action === 'kick' && targetParticipantId) {
+          const kickedClient = this.clients.get(targetParticipantId);
+          if (kickedClient && kickedClient.ws.readyState === WebSocket.OPEN) {
+            kickedClient.ws.send(
+              JSON.stringify({
+                type: 'error',
+                payload: { message: 'You have been removed from the meeting by the Controller.' },
+              }),
+            );
+            kickedClient.ws.close();
+          }
+        }
+
+        const updatedRoom = this.roomService.getRoom(targetRoomId);
+        if (updatedRoom) {
+          this.broadcastToRoom(targetRoomId, {
+            type: 'room_state_updated',
+            roomId: targetRoomId,
+            payload: { room: updatedRoom },
+          });
+        }
+        break;
+      }
+
+      default:
+        console.warn(`[NestJS SFU] Unknown signaling message type: ${type}`);
+    }
+  }
+
+  private handleDisconnect(clientId: string) {
+    const clientData = this.clients.get(clientId);
+    this.clients.delete(clientId);
+
+    if (clientData?.roomId) {
+      const roomId = clientData.roomId;
+      this.roomService.leave(roomId, clientId);
+
+      this.broadcastToRoom(roomId, {
+        type: 'participant_left',
+        roomId,
+        payload: { participantId: clientId },
+      });
+
+      const updatedRoom = this.roomService.getRoom(roomId);
+      if (updatedRoom) {
+        this.broadcastToRoom(roomId, {
+          type: 'room_state_updated',
+          roomId,
+          payload: { room: updatedRoom },
+        });
+      }
+    }
+
+    console.log(`[NestJS SFU] Client disconnected: ${clientId} (Remaining: ${this.clients.size})`);
   }
 }
