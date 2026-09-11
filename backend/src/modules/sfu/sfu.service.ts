@@ -1,16 +1,16 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import * as mediasoup from 'mediasoup';
-import { Worker, Router, WebRtcTransport, Producer, Consumer } from 'mediasoup/node/lib/types';
+import type { types } from 'mediasoup';
 import { mediasoupConfig } from '../../config/mediasoup.config';
 
 @Injectable()
 export class SfuService implements OnModuleInit, OnModuleDestroy {
-  private workers: Worker[] = [];
+  private workers: types.Worker[] = [];
   private nextWorkerIdx = 0;
-  private routers = new Map<string, Router>();
-  private transports = new Map<string, WebRtcTransport>();
-  private producers = new Map<string, Producer>();
-  private consumers = new Map<string, Consumer>();
+  private routers = new Map<string, types.Router>();
+  private transports = new Map<string, types.WebRtcTransport>();
+  private producers = new Map<string, types.Producer>();
+  private consumers = new Map<string, types.Consumer>();
 
   async onModuleInit() {
     await this.initWorkers();
@@ -44,13 +44,13 @@ export class SfuService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private getNextWorker(): Worker {
+  private getNextWorker(): types.Worker {
     const worker = this.workers[this.nextWorkerIdx];
     this.nextWorkerIdx = (this.nextWorkerIdx + 1) % this.workers.length;
     return worker;
   }
 
-  async getOrCreateRouter(roomId: string): Promise<Router> {
+  async getOrCreateRouter(roomId: string): Promise<types.Router> {
     if (!this.routers.has(roomId)) {
       const worker = this.getNextWorker();
       const router = await worker.createRouter({ mediaCodecs: mediasoupConfig.router.mediaCodecs });

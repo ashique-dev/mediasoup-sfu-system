@@ -1,4 +1,4 @@
-import { RtpCodecCapability } from 'mediasoup/node/lib/RtpParameters';
+import type { types } from 'mediasoup';
 import os from 'os';
 
 export const mediasoupConfig = {
@@ -42,7 +42,7 @@ export const mediasoupConfig = {
           'level-asymmetry-allowed': 1,
         },
       },
-    ] as RtpCodecCapability[],
+    ] as types.RtpCodecCapability[],
   },
   webRtcTransport: {
     listenIps: [
