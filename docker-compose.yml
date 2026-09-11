@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  # =========================================================================
+  # 1. NestJS Back-End Service (Mediasoup SFU & WebSocket Signaling Gateway)
+  # =========================================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: mediasoup-sfu-backend
+    restart: unless-stopped
+    ports:
+      - "3001:3001"                   # HTTP REST API & WebSocket Signaling
+      - "40000-40100:40000-40100/udp" # WebRTC SFU Media RTP Ports (UDP)
+      - "40000-40100:40000-40100/tcp" # WebRTC SFU Media RTP Ports (TCP)
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - MEDIASOUP_LISTEN_IP=0.0.0.0
+      - MEDIASOUP_ANNOUNCED_IP=127.0.0.1
+      - MEDIASOUP_MIN_PORT=40000
+      - MEDIASOUP_MAX_PORT=40100
+      - RECORDINGS_DIR=/app/recordings
+    volumes:
+      - ./recordings:/app/recordings   # Mount local directory for video & transcript persistence
+    networks:
+      - sfu-network
+
+  # =========================================================================
+  # 2. ReactJS Front-End Service (Client Camera, Avatar, & Meeting Controls)
+  # =========================================================================
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: mediasoup-sfu-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"                     # Nginx Web Entrypoint
+    depends_on:
+      - backend
+    environment:
+      - VITE_SIGNALING_URL=ws://localhost:3001/ws
+    networks:
+      - sfu-network
+
+networks:
+  sfu-network:
+    driver: bridge

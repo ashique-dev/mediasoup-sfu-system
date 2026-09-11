@@ -1,0 +1,7 @@
+{
+  "name": "mediasoup-sfu-system",
+  "description": "SFU video conferencing system prototype with mediasoup, WebSocket signaling, meeting controller authorization, half-duplex avatar speech loop, and local recording storage.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

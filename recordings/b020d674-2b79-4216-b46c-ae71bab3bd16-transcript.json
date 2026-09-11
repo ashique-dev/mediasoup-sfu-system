@@ -1,0 +1,16 @@
+[
+  {
+    "id": "1",
+    "speaker": "client",
+    "speakerName": "Client (Controller)",
+    "text": "Testing client speech stream to mediasoup SFU transport.",
+    "timestamp": 1710000000000
+  },
+  {
+    "id": "2",
+    "speaker": "avatar",
+    "speakerName": "AI Avatar (Mediasoup SFU Node)",
+    "text": "I have received your video transmission via the SFU. Your audio fidelity is nominal with VP8 packetization.",
+    "timestamp": 1710000010000
+  }
+]

@@ -1,0 +1,28 @@
+{
+  "id": "b020d674-2b79-4216-b46c-ae71bab3bd16",
+  "roomId": "main-sfu-room",
+  "title": "Baseline SFU Handshake Session",
+  "videoFileName": "",
+  "transcriptFileName": "b020d674-2b79-4216-b46c-ae71bab3bd16-transcript.json",
+  "durationSeconds": 12,
+  "fileSizeBytes": 0,
+  "createdAt": "2026-09-11T17:34:28.103Z",
+  "videoUrl": "",
+  "transcriptUrl": "/recordings/b020d674-2b79-4216-b46c-ae71bab3bd16-transcript.json",
+  "transcript": [
+    {
+      "id": "1",
+      "speaker": "client",
+      "speakerName": "Client (Controller)",
+      "text": "Testing client speech stream to mediasoup SFU transport.",
+      "timestamp": 1710000000000
+    },
+    {
+      "id": "2",
+      "speaker": "avatar",
+      "speakerName": "AI Avatar (Mediasoup SFU Node)",
+      "text": "I have received your video transmission via the SFU. Your audio fidelity is nominal with VP8 packetization.",
+      "timestamp": 1710000010000
+    }
+  ]
+}
