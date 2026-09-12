@@ -33,7 +33,7 @@ export class RecordingController {
           cb(null, `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_')}`);
         },
       }),
-      limits: { fileSize: 100 * 1024 * 1024 },
+      limits: { fileSize: 500 * 1024 * 1024 },
     }),
   )
   saveRecording(@UploadedFile() file: Express.Multer.File, @Body() body: any) {

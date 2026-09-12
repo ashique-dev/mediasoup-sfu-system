@@ -19,6 +19,9 @@ server {
     listen 80;
     server_name localhost;
 
+    # Allow large video and recording uploads up to 500MB without HTTP 413 Request Entity Too Large
+    client_max_body_size 500M;
+
     location / {
         root /usr/share/nginx/html;
         index index.html index.htm;
@@ -36,12 +39,17 @@ server {
 
     # Proxy REST API
     location /api/ {
+        client_max_body_size 500M;
         proxy_pass http://backend:3001/api/;
         proxy_set_header Host $host;
+        proxy_read_timeout 300s;
+        proxy_connect_timeout 300s;
+        proxy_send_timeout 300s;
     }
 
     # Proxy recordings with full HTTP Range & video streaming support
     location /recordings/ {
+        client_max_body_size 500M;
         proxy_pass http://backend:3001/recordings/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;

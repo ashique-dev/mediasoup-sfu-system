@@ -524,8 +524,19 @@ export class SfuClient {
     });
 
     if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      throw new Error(`Failed to save recording: ${response.statusText} ${errText}`);
+      let errDetail = response.statusText;
+      try {
+        const errText = await response.text();
+        if (response.status === 413) {
+          errDetail = 'Payload Too Large: File exceeds upload limit. Ensure proxy configuration allows up to 500MB.';
+        } else if (errText.trim().startsWith('{')) {
+          const json = JSON.parse(errText);
+          errDetail = json.message || json.error || errDetail;
+        } else if (!errText.trim().startsWith('<')) {
+          errDetail = errText;
+        }
+      } catch {}
+      throw new Error(`Failed to save recording: ${errDetail}`);
     }
 
     return await response.json();

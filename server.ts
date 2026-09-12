@@ -28,10 +28,10 @@ const storage = multer.diskStorage({
     cb(null, `${timestamp}-${cleanName}`);
   },
 });
-const upload = multer({ storage, limits: { fileSize: 100 * 1024 * 1024 } });
+const upload = multer({ storage, limits: { fileSize: 500 * 1024 * 1024 } });
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: '500mb' }));
+app.use(express.urlencoded({ extended: true, limit: '500mb' }));
 
 // Serve recordings with robust HTTP 206 Partial Content video streaming & 0-byte protection
 app.use('/recordings/:filename', (req: express.Request, res: express.Response, next: express.NextFunction) => {
