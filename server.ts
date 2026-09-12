@@ -622,6 +622,12 @@ wss.on('connection', (ws: WebSocket) => {
           room.turnState = 'client_speaking';
           room.activeSpeakerId = clientId;
 
+          reply('turn_started', {
+            status: 'ok',
+            turnState: 'client_speaking',
+            activeSpeakerId: clientId,
+          });
+
           broadcastToRoom(room.id, {
             type: 'turn_state_changed',
             roomId: room.id,
@@ -639,6 +645,11 @@ wss.on('connection', (ws: WebSocket) => {
           const room = getOrCreateRoom(roomId);
           room.turnState = 'avatar_speaking';
           room.activeSpeakerId = 'avatar';
+
+          reply('turn_over_ack', {
+            status: 'ok',
+            turnState: 'avatar_speaking',
+          });
 
           broadcastToRoom(room.id, {
             type: 'turn_state_changed',

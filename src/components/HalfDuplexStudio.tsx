@@ -103,9 +103,14 @@ export const HalfDuplexStudio: React.FC<HalfDuplexStudioProps> = ({
     if (turnState === 'avatar_speaking') return;
     setSaveSuccess(null);
     try {
-      await sfuClient.produceMedia();
+      // 1. Immediately start speech turn and local MediaRecorder
       await sfuClient.startTurn();
       setTurnState('client_speaking');
+
+      // 2. Negotiate WebRTC SFU media production non-blockingly
+      sfuClient.produceMedia().catch((err) => {
+        console.warn('WebRTC produceMedia notice:', err);
+      });
 
       // Record client transcript turn
       const newTurn: SpeechTranscriptItem = {
@@ -139,6 +144,10 @@ export const HalfDuplexStudio: React.FC<HalfDuplexStudioProps> = ({
       setAvatarProgress(0);
       await sfuClient.endTurn();
       setTurnState('avatar_speaking');
+
+      // Update byte metrics
+      setRecordedBytes(sfuClient.getTotalRecordedBytes());
+      setRecordedChunksCount(sfuClient.recordedChunks.length);
     } catch (err: any) {
       console.error('Failed to signal speech over:', err);
     }
@@ -170,6 +179,14 @@ export const HalfDuplexStudio: React.FC<HalfDuplexStudioProps> = ({
 
   // Save Video and Transcript to local directory (Requirement 8.b2)
   const handleSaveToLocalDirectory = async () => {
+    // If client is currently in active speech turn, finalize and flush recorder first
+    if (turnState === 'client_speaking' || (sfuClient.mediaRecorder && sfuClient.mediaRecorder.state === 'recording')) {
+      await sfuClient.endTurn();
+      setTurnState('avatar_speaking');
+      setRecordedBytes(sfuClient.getTotalRecordedBytes());
+      setRecordedChunksCount(sfuClient.recordedChunks.length);
+    }
+
     const totalBytes = sfuClient.getTotalRecordedBytes();
     if (totalBytes === 0 && sfuClient.recordedChunks.length === 0) {
       alert(
@@ -242,10 +259,14 @@ export const HalfDuplexStudio: React.FC<HalfDuplexStudioProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
-          {recordedBytes > 0 && (
+          {(recordedBytes > 0 || turnState === 'client_speaking') && (
             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-950/70 border border-indigo-700/60 text-xs text-indigo-200 font-mono">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-              <span>{(recordedBytes / (1024 * 1024)).toFixed(2)} MB ({recordedChunksCount} chunks)</span>
+              <span className={`w-2 h-2 rounded-full ${turnState === 'client_speaking' ? 'bg-red-500 animate-ping' : 'bg-emerald-400 animate-pulse'}`}></span>
+              <span>
+                {recordedBytes > 0
+                  ? `${(recordedBytes / (1024 * 1024)).toFixed(2)} MB (${recordedChunksCount} chunks)`
+                  : 'Recording media...'}
+              </span>
             </div>
           )}
 

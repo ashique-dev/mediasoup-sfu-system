@@ -221,6 +221,12 @@ export class SignalingGateway implements OnModuleInit, OnModuleDestroy {
 
         this.roomService.setTurnState(targetRoomId, 'client_speaking', clientId);
 
+        respond('turn_started', {
+          status: 'ok',
+          turnState: 'client_speaking',
+          activeSpeakerId: clientId,
+        });
+
         this.broadcastToRoom(targetRoomId, {
           type: 'turn_state_changed',
           roomId: targetRoomId,
@@ -236,6 +242,11 @@ export class SignalingGateway implements OnModuleInit, OnModuleDestroy {
       case 'turn_over': {
         const targetRoomId = roomId || 'default';
         this.roomService.setTurnState(targetRoomId, 'avatar_speaking', 'avatar');
+
+        respond('turn_over_ack', {
+          status: 'ok',
+          turnState: 'avatar_speaking',
+        });
 
         this.broadcastToRoom(targetRoomId, {
           type: 'turn_state_changed',

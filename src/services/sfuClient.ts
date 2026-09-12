@@ -179,10 +179,50 @@ export class SfuClient {
         audio: true,
       });
       return this.localStream;
-    } catch (err) {
-      console.warn('Physical camera unavailable or access denied. Initializing synthetic test media track...', err);
-      this.localStream = this.createSyntheticVideoStream('Client (Simulated)');
-      return this.localStream;
+    } catch (err1) {
+      console.warn('getUserMedia audio+video failed, trying video only:', err1);
+      try {
+        const vidStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } },
+          audio: false,
+        });
+        // Add synthetic silent audio track so container has an audio track
+        const audioTrack = this.createSyntheticAudioTrack();
+        if (audioTrack) {
+          vidStream.addTrack(audioTrack);
+        }
+        this.localStream = vidStream;
+        return this.localStream;
+      } catch (err2) {
+        console.warn('Physical camera unavailable or access denied. Initializing synthetic test media track...', err2);
+        this.localStream = this.createSyntheticVideoStream('Client (Simulated)');
+        return this.localStream;
+      }
+    }
+  }
+
+  // Creates a silent audio track via Web Audio API to ensure recordings have an audio channel
+  private createSyntheticAudioTrack(): MediaStreamTrack | null {
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return null;
+      if (!this.audioContext) {
+        this.audioContext = new AudioContextClass();
+      }
+      if (this.audioContext.state === 'suspended') {
+        this.audioContext.resume().catch(() => {});
+      }
+      const osc = this.audioContext.createOscillator();
+      const dst = this.audioContext.createMediaStreamDestination();
+      osc.frequency.setValueAtTime(440, this.audioContext.currentTime);
+      const gain = this.audioContext.createGain();
+      gain.gain.value = 0.0001; // silent baseline
+      osc.connect(gain);
+      gain.connect(dst);
+      osc.start();
+      return dst.stream.getAudioTracks()[0] || null;
+    } catch {
+      return null;
     }
   }
 
@@ -220,8 +260,8 @@ export class SfuClient {
       }
 
       // Animated glowing orb
-      const cx = 320 + Math.sin(frame * 0.03) * 80;
-      const cy = 200 + Math.cos(frame * 0.03) * 40;
+      const cx = 320 + Math.sin(frame * 0.05) * 80;
+      const cy = 200 + Math.cos(frame * 0.05) * 40;
       const radGrad = ctx.createRadialGradient(cx, cy, 10, cx, cy, 120);
       radGrad.addColorStop(0, '#38bdf8');
       radGrad.addColorStop(0.5, '#6366f1');
@@ -235,40 +275,34 @@ export class SfuClient {
       ctx.fillStyle = '#f8fafc';
       ctx.font = 'bold 22px system-ui, sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(`● ${label} SFU Feed`, 320, 360);
+      ctx.fillText(`● ${label} SFU Feed`, 320, 350);
+
+      ctx.fillStyle = '#38bdf8';
+      ctx.font = 'bold 15px monospace';
+      ctx.fillText(`Active Frame: #${frame} | ${new Date().toISOString().substring(11, 19)}`, 320, 385);
 
       ctx.fillStyle = '#94a3b8';
-      ctx.font = '14px system-ui, sans-serif';
-      ctx.fillText(`VP8 30fps | RTP Timestamp: ${Date.now()}`, 320, 395);
-
-      requestAnimationFrame(draw);
+      ctx.font = '13px system-ui, sans-serif';
+      ctx.fillText(`VP8 30fps | WebRTC MediaStream Active`, 320, 415);
     };
 
     draw();
 
+    // In Chrome/Chromium, requestAnimationFrame stops when canvas is not attached to DOM or tab is unfocused.
+    // Using setInterval guarantees continuous 30fps rendering for canvas.captureStream!
+    const intervalTimer = setInterval(draw, 1000 / 30);
+
     const canvasStream = canvas.captureStream(30);
 
-    // Add silent audio track via Web Audio API AudioContext
-    try {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      if (AudioContextClass) {
-        const audioCtx = new AudioContextClass();
-        this.audioContext = audioCtx;
-        if (audioCtx.state === 'suspended') {
-          audioCtx.resume().catch(() => {});
-        }
-        const osc = audioCtx.createOscillator();
-        const dst = audioCtx.createMediaStreamDestination();
-        osc.frequency.setValueAtTime(440, audioCtx.currentTime);
-        const gain = audioCtx.createGain();
-        gain.gain.value = 0.001; // nearly silent baseline
-        osc.connect(gain);
-        gain.connect(dst);
-        osc.start();
-        dst.stream.getAudioTracks().forEach((t) => canvasStream.addTrack(t));
-      }
-    } catch {
-      // Ignore if web audio isn't supported
+    // Stop timer when canvas stream tracks end
+    canvasStream.getVideoTracks().forEach((track) => {
+      track.addEventListener('ended', () => clearInterval(intervalTimer));
+    });
+
+    // Add audio track
+    const audioTrack = this.createSyntheticAudioTrack();
+    if (audioTrack) {
+      canvasStream.addTrack(audioTrack);
     }
 
     return canvasStream;
@@ -337,10 +371,11 @@ export class SfuClient {
     }
   }
 
-  // Optimal codec selection for WebM/MP4 recording
+  // Optimal codec selection for WebM/MP4 recording based on available tracks
   public getOptimalMimeType(): string {
     if (typeof MediaRecorder === 'undefined') return '';
-    const formats = [
+    const hasAudio = !!(this.localStream && this.localStream.getAudioTracks().length > 0);
+    const formatsWithAudio = [
       'video/webm;codecs=vp8,opus',
       'video/webm;codecs=vp9,opus',
       'video/webm;codecs=vp8',
@@ -348,8 +383,18 @@ export class SfuClient {
       'video/mp4;codecs=avc1,mp4a.40.2',
       'video/mp4'
     ];
-    for (const fmt of formats) {
-      if (MediaRecorder.isTypeSupported(fmt)) return fmt;
+    const formatsVideoOnly = [
+      'video/webm;codecs=vp8',
+      'video/webm;codecs=vp9',
+      'video/webm',
+      'video/mp4'
+    ];
+
+    const candidateFormats = hasAudio ? formatsWithAudio : formatsVideoOnly;
+    for (const fmt of candidateFormats) {
+      try {
+        if (MediaRecorder.isTypeSupported(fmt)) return fmt;
+      } catch {}
     }
     return '';
   }
@@ -360,13 +405,12 @@ export class SfuClient {
 
   // Half-Duplex Feature 8.b1: Start speech turn
   public async startTurn(): Promise<void> {
-    await this.sendRequest('turn_start');
-
+    // 1. Ensure local media stream is available first
     if (!this.localStream) {
       await this.getLocalMediaStream();
     }
 
-    // Resume AudioContext if suspended
+    // 2. Resume AudioContext if suspended
     if (this.audioContext && this.audioContext.state === 'suspended') {
       try {
         await this.audioContext.resume();
@@ -375,9 +419,15 @@ export class SfuClient {
       }
     }
 
-    // Start local recording buffer to save complete video (Feature 8.b2)
+    // 3. Start local recording buffer immediately so no speech is lost (Feature 8.b2)
     if (this.localStream && typeof MediaRecorder !== 'undefined') {
       try {
+        if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+          try {
+            this.mediaRecorder.stop();
+          } catch {}
+        }
+
         this.recordedChunks = [];
         const mimeType = this.getOptimalMimeType();
         const options: MediaRecorderOptions = mimeType ? { mimeType } : {};
@@ -395,12 +445,18 @@ export class SfuClient {
         this.mediaRecorder.onerror = (event: any) => {
           console.error('[SFU MediaRecorder] Error occurred:', event);
         };
-        // Emit chunks every 500ms
-        this.mediaRecorder.start(500);
+        // Emit chunks every 250ms for real-time responsiveness
+        this.mediaRecorder.start(250);
+        console.log('[SFU Client] MediaRecorder recording active (mimeType: ' + (options.mimeType || 'default') + ')');
       } catch (e) {
         console.warn('Could not initialize MediaRecorder:', e);
       }
     }
+
+    // 4. Send signaling turn_start non-blockingly so recorder is not delayed
+    this.sendRequest('turn_start').catch((err) => {
+      console.warn('Signaling turn_start notice:', err.message);
+    });
   }
 
   // Half-Duplex Feature 8.b1: Declare speech is over, hand over to avatar
@@ -418,18 +474,18 @@ export class SfuClient {
 
         recorder.onstop = done;
         try {
-          recorder.requestData();
-        } catch (e) {}
-        try {
           recorder.stop();
         } catch (e) {
           done();
         }
         // Safety timeout in case onstop doesn't fire
-        setTimeout(done, 600);
+        setTimeout(done, 500);
       });
     }
-    await this.sendRequest('turn_over');
+    // Notify server signaling turn_over
+    this.sendRequest('turn_over').catch((err) => {
+      console.warn('Signaling turn_over notice:', err.message);
+    });
   }
 
   // Meeting Controller Authorization Actions (Feature 8.a)
