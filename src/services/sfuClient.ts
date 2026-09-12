@@ -28,6 +28,8 @@ export class SfuClient {
   public localStream: MediaStream | null = null;
   public mediaRecorder: MediaRecorder | null = null;
   public recordedChunks: Blob[] = [];
+  public audioContext: AudioContext | null = null;
+  public onRecordingChunk?: (totalBytes: number, totalChunks: number) => void;
 
   constructor(callbacks: SfuClientCallbacks) {
     this.callbacks = callbacks;
@@ -251,6 +253,10 @@ export class SfuClient {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       if (AudioContextClass) {
         const audioCtx = new AudioContextClass();
+        this.audioContext = audioCtx;
+        if (audioCtx.state === 'suspended') {
+          audioCtx.resume().catch(() => {});
+        }
         const osc = audioCtx.createOscillator();
         const dst = audioCtx.createMediaStreamDestination();
         osc.frequency.setValueAtTime(440, audioCtx.currentTime);
@@ -331,27 +337,66 @@ export class SfuClient {
     }
   }
 
+  // Optimal codec selection for WebM/MP4 recording
+  public getOptimalMimeType(): string {
+    if (typeof MediaRecorder === 'undefined') return '';
+    const formats = [
+      'video/webm;codecs=vp8,opus',
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp8',
+      'video/webm',
+      'video/mp4;codecs=avc1,mp4a.40.2',
+      'video/mp4'
+    ];
+    for (const fmt of formats) {
+      if (MediaRecorder.isTypeSupported(fmt)) return fmt;
+    }
+    return '';
+  }
+
+  public getTotalRecordedBytes(): number {
+    return this.recordedChunks.reduce((acc, chunk) => acc + chunk.size, 0);
+  }
+
   // Half-Duplex Feature 8.b1: Start speech turn
   public async startTurn(): Promise<void> {
     await this.sendRequest('turn_start');
+
+    if (!this.localStream) {
+      await this.getLocalMediaStream();
+    }
+
+    // Resume AudioContext if suspended
+    if (this.audioContext && this.audioContext.state === 'suspended') {
+      try {
+        await this.audioContext.resume();
+      } catch (e) {
+        console.warn('Could not resume audioContext:', e);
+      }
+    }
 
     // Start local recording buffer to save complete video (Feature 8.b2)
     if (this.localStream && typeof MediaRecorder !== 'undefined') {
       try {
         this.recordedChunks = [];
-        const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
-          ? 'video/webm;codecs=vp8'
-          : MediaRecorder.isTypeSupported('video/webm')
-          ? 'video/webm'
-          : 'video/mp4';
+        const mimeType = this.getOptimalMimeType();
+        const options: MediaRecorderOptions = mimeType ? { mimeType } : {};
 
-        this.mediaRecorder = new MediaRecorder(this.localStream, { mimeType });
-        this.mediaRecorder.ondataavailable = (event) => {
+        this.mediaRecorder = new MediaRecorder(this.localStream, options);
+        this.mediaRecorder.ondataavailable = (event: BlobEvent) => {
           if (event.data && event.data.size > 0) {
             this.recordedChunks.push(event.data);
+            const totalBytes = this.getTotalRecordedBytes();
+            if (this.onRecordingChunk) {
+              this.onRecordingChunk(totalBytes, this.recordedChunks.length);
+            }
           }
         };
-        this.mediaRecorder.start(250);
+        this.mediaRecorder.onerror = (event: any) => {
+          console.error('[SFU MediaRecorder] Error occurred:', event);
+        };
+        // Emit chunks every 500ms
+        this.mediaRecorder.start(500);
       } catch (e) {
         console.warn('Could not initialize MediaRecorder:', e);
       }
@@ -360,8 +405,29 @@ export class SfuClient {
 
   // Half-Duplex Feature 8.b1: Declare speech is over, hand over to avatar
   public async endTurn(): Promise<void> {
-    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
-      this.mediaRecorder.stop();
+    if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
+      await new Promise<void>((resolve) => {
+        const recorder = this.mediaRecorder!;
+        let resolved = false;
+        const done = () => {
+          if (!resolved) {
+            resolved = true;
+            resolve();
+          }
+        };
+
+        recorder.onstop = done;
+        try {
+          recorder.requestData();
+        } catch (e) {}
+        try {
+          recorder.stop();
+        } catch (e) {
+          done();
+        }
+        // Safety timeout in case onstop doesn't fire
+        setTimeout(done, 600);
+      });
     }
     await this.sendRequest('turn_over');
   }
@@ -373,13 +439,28 @@ export class SfuClient {
 
   // Save Video and Transcript to Local Project Directory (Feature 8.b2)
   public async saveRecordingLocally(transcript: SpeechTranscriptItem[], title?: string): Promise<any> {
-    const videoBlob = new Blob(this.recordedChunks, { type: 'video/webm' });
+    // If recorder is still running, finalize it first
+    if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
+      await this.endTurn();
+    }
+
+    if (this.recordedChunks.length === 0) {
+      throw new Error('No recorded media chunks captured. Please start a speech turn and record audio/video first.');
+    }
+
+    const recordedMimeType = this.mediaRecorder?.mimeType || 'video/webm';
+    const videoBlob = new Blob(this.recordedChunks, { type: recordedMimeType });
+
+    if (videoBlob.size === 0) {
+      throw new Error('Captured video file is 0 bytes. Ensure camera or audio tracks are actively sending frames.');
+    }
+
     const formData = new FormData();
     formData.append('video', videoBlob, `sfu-speech-${Date.now()}.webm`);
     formData.append('roomId', this.currentRoomId || 'default-room');
     formData.append('title', title || `Session Speech ${new Date().toLocaleTimeString()}`);
     formData.append('transcriptJson', JSON.stringify(transcript));
-    formData.append('duration', String(Math.max(5, Math.round(this.recordedChunks.length * 0.25))));
+    formData.append('duration', String(Math.max(1, Math.round(this.recordedChunks.length * 0.5))));
 
     const response = await fetch('/api/recordings/save', {
       method: 'POST',
@@ -387,7 +468,8 @@ export class SfuClient {
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to save recording: ${response.statusText}`);
+      const errText = await response.text().catch(() => '');
+      throw new Error(`Failed to save recording: ${response.statusText} ${errText}`);
     }
 
     return await response.json();

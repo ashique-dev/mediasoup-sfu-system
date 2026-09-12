@@ -42,7 +42,18 @@ export const HalfDuplexStudio: React.FC<HalfDuplexStudioProps> = ({
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
   const [clientSpeechSeconds, setClientSpeechSeconds] = useState(0);
+  const [recordedBytes, setRecordedBytes] = useState(0);
+  const [recordedChunksCount, setRecordedChunksCount] = useState(0);
+  const [savedVideoUrl, setSavedVideoUrl] = useState<string | null>(null);
   const timerRef = useRef<any>(null);
+
+  // Track recording chunks in real-time
+  useEffect(() => {
+    sfuClient.onRecordingChunk = (bytes, chunks) => {
+      setRecordedBytes(bytes);
+      setRecordedChunksCount(chunks);
+    };
+  }, [sfuClient]);
 
   // Sync turnState with roomState
   useEffect(() => {
@@ -159,8 +170,8 @@ export const HalfDuplexStudio: React.FC<HalfDuplexStudioProps> = ({
 
   // Save Video and Transcript to local directory (Requirement 8.b2)
   const handleSaveToLocalDirectory = async () => {
-    if (transcripts.length === 0 && sfuClient.recordedChunks.length === 0) {
-      alert('Please perform at least one speech turn before saving.');
+    if (sfuClient.recordedChunks.length === 0 && recordedBytes === 0) {
+      alert('Please perform at least one speech turn with active camera/mic before saving. Click "Start Speech", speak, and then click "Speech Over" to capture video.');
       return;
     }
 
@@ -171,6 +182,9 @@ export const HalfDuplexStudio: React.FC<HalfDuplexStudioProps> = ({
       const result = await sfuClient.saveRecordingLocally(transcripts, title);
       setIsSaving(false);
       setSaveSuccess(`Saved to local directory: ./recordings/${result.recording.videoFileName || result.recording.transcriptFileName}`);
+      if (result.recording && result.recording.videoUrl) {
+        setSavedVideoUrl(result.recording.videoUrl);
+      }
       onSavedRecording();
     } catch (err: any) {
       setIsSaving(false);
@@ -220,6 +234,13 @@ export const HalfDuplexStudio: React.FC<HalfDuplexStudioProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          {recordedBytes > 0 && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-950/70 border border-indigo-700/60 text-xs text-indigo-200 font-mono">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              <span>{(recordedBytes / (1024 * 1024)).toFixed(2)} MB ({recordedChunksCount} chunks)</span>
+            </div>
+          )}
+
           <button
             id="toggle-synthetic-feed-btn"
             onClick={() => setUseSynthetic(!useSynthetic)}
@@ -243,12 +264,28 @@ export const HalfDuplexStudio: React.FC<HalfDuplexStudioProps> = ({
       </div>
 
       {saveSuccess && (
-        <div id="save-success-alert" className="flex items-center justify-between p-3.5 rounded-lg border border-emerald-500/40 bg-emerald-950/40 text-emerald-300 text-sm">
-          <div className="flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
-            <span>{saveSuccess}</span>
+        <div id="save-success-alert" className="flex flex-col gap-3 p-4 rounded-xl border border-emerald-500/40 bg-emerald-950/40 text-emerald-300 text-sm">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 font-medium">
+              <CheckCircle2 className="w-4 h-4 flex-shrink-0 text-emerald-400" />
+              <span>{saveSuccess}</span>
+            </div>
+            <span className="text-xs text-emerald-400/80 font-mono">Permissions: 0666 (VLC / Chromium Compatible)</span>
           </div>
-          <span className="text-xs text-emerald-400/80">Requirement 8.b2 Verified</span>
+          {savedVideoUrl && (
+            <div className="flex items-center gap-3 pt-2 border-t border-emerald-500/20">
+              <span className="text-xs text-slate-300">Verify media playback directly:</span>
+              <a
+                href={savedVideoUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition"
+              >
+                <Play className="w-3 h-3 fill-current" />
+                <span>Open Video Stream</span>
+              </a>
+            </div>
+          )}
         </div>
       )}
 

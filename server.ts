@@ -231,13 +231,24 @@ app.post('/api/recordings/save', upload.single('video'), (req, res) => {
       }
     }
 
+    // Ensure uploaded video file has open permissions for external media players (VLC)
+    if (videoFile && videoFile.path && fs.existsSync(videoFile.path)) {
+      try {
+        fs.chmodSync(videoFile.path, 0o666);
+      } catch {}
+    }
+
     // Save transcript file alongside video in local directory
     const transcriptFileName = `${id}-transcript.json`;
     const transcriptFilePath = path.join(RECORDINGS_DIR, transcriptFileName);
     fs.writeFileSync(transcriptFilePath, JSON.stringify(parsedTranscript, null, 2), 'utf-8');
+    try {
+      fs.chmodSync(transcriptFilePath, 0o666);
+    } catch {}
 
     // Create metadata index entry
     const metaFileName = `${id}-meta.json`;
+    const metaFilePath = path.join(RECORDINGS_DIR, metaFileName);
     const metadata = {
       id,
       roomId: roomId || 'default-room',
@@ -252,7 +263,10 @@ app.post('/api/recordings/save', upload.single('video'), (req, res) => {
       transcript: parsedTranscript,
     };
 
-    fs.writeFileSync(path.join(RECORDINGS_DIR, metaFileName), JSON.stringify(metadata, null, 2), 'utf-8');
+    fs.writeFileSync(metaFilePath, JSON.stringify(metadata, null, 2), 'utf-8');
+    try {
+      fs.chmodSync(metaFilePath, 0o666);
+    } catch {}
 
     res.status(201).json({
       success: true,

@@ -11,6 +11,11 @@ export class RecordingService {
     if (!fs.existsSync(this.storageDir)) {
       fs.mkdirSync(this.storageDir, { recursive: true });
     }
+    try {
+      fs.chmodSync(this.storageDir, 0o777);
+    } catch (e) {
+      console.warn('Could not set permissions on storageDir:', e);
+    }
   }
 
   saveRecording(file: Express.Multer.File, body: any) {
@@ -26,12 +31,24 @@ export class RecordingService {
       }
     }
 
+    if (file && file.path && fs.existsSync(file.path)) {
+      try {
+        fs.chmodSync(file.path, 0o666);
+      } catch (err) {
+        console.warn('Could not chmod video file:', err);
+      }
+    }
+
     const transcriptFileName = `${id}-transcript.json`;
+    const transcriptPath = path.join(this.storageDir, transcriptFileName);
     fs.writeFileSync(
-      path.join(this.storageDir, transcriptFileName),
+      transcriptPath,
       JSON.stringify(transcript, null, 2),
       'utf-8',
     );
+    try {
+      fs.chmodSync(transcriptPath, 0o666);
+    } catch {}
 
     const metadata = {
       id,
@@ -47,11 +64,15 @@ export class RecordingService {
       transcript,
     };
 
+    const metaPath = path.join(this.storageDir, `${id}-meta.json`);
     fs.writeFileSync(
-      path.join(this.storageDir, `${id}-meta.json`),
+      metaPath,
       JSON.stringify(metadata, null, 2),
       'utf-8',
     );
+    try {
+      fs.chmodSync(metaPath, 0o666);
+    } catch {}
 
     return metadata;
   }
