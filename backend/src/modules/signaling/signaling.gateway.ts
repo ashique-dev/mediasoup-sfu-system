@@ -308,16 +308,53 @@ export class SignalingGateway implements OnModuleInit, OnModuleDestroy {
         break;
       }
 
+      case 'peer_signal': {
+        const { targetId, signal } = payload;
+        if (targetId && this.clients.has(targetId)) {
+          const targetClient = this.clients.get(targetId);
+          if (targetClient && targetClient.ws.readyState === WebSocket.OPEN) {
+            targetClient.ws.send(
+              JSON.stringify({
+                type: 'peer_signal',
+                roomId,
+                senderId: clientId,
+                payload: { senderId: clientId, signal },
+              }),
+            );
+          }
+        }
+        break;
+      }
+
+      case 'update_media_state': {
+        const targetRoomId = roomId || 'default';
+        const room = this.roomService.getRoom(targetRoomId);
+        if (room && room.participants[clientId]) {
+          if (typeof payload.isMuted === 'boolean') {
+            room.participants[clientId].isMuted = payload.isMuted;
+          }
+          if (typeof payload.isVideoMuted === 'boolean') {
+            room.participants[clientId].isVideoMuted = payload.isVideoMuted;
+          }
+          this.broadcastToRoom(targetRoomId, {
+            type: 'room_state_updated',
+            roomId: targetRoomId,
+            payload: { room },
+          });
+        }
+        break;
+      }
+
       case 'controller_action': {
         const targetRoomId = roomId || 'default';
         const room = this.roomService.getRoom(targetRoomId);
 
-        if (!room || room.controllerId !== clientId) {
+        const { action, targetParticipantId } = payload;
+        if (action !== 'reclaim_host' && (!room || room.controllerId !== clientId)) {
           respond('error', { message: 'Authorization Failed: Only Meeting Controllers can perform this action.' });
           return;
         }
 
-        const { action, targetParticipantId } = payload;
         this.roomService.executeControllerAction(targetRoomId, clientId, action, targetParticipantId);
 
         if (action === 'kick' && targetParticipantId) {

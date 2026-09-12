@@ -6,6 +6,8 @@ export interface SfuClientCallbacks {
   onRoomStateUpdated?: (room: RoomState) => void;
   onParticipantJoined?: (participant: Participant) => void;
   onParticipantLeft?: (participantId: string) => void;
+  onRemoteStream?: (participantId: string, stream: MediaStream) => void;
+  onRemoteStreamRemoved?: (participantId: string) => void;
   onTurnStateChanged?: (turnState: 'idle' | 'client_speaking' | 'avatar_speaking', message: string) => void;
   onAvatarSpeechChunk?: (chunk: string, fullText: string, progress: number) => void;
   onAvatarSpeechComplete?: (fullText: string) => void;
@@ -22,6 +24,21 @@ export class SfuClient {
   private pendingRequests = new Map<string, (payload: any) => void>();
   private callbacks: SfuClientCallbacks = {};
 
+  // Real Multi-User WebRTC Peer Connections for Meeting Room
+  private peerConnections = new Map<string, RTCPeerConnection>();
+  public remoteStreams = new Map<string, MediaStream>();
+  private remoteStreamListeners = new Set<(participantId: string, stream: MediaStream | null) => void>();
+  private iceCandidateQueues = new Map<string, RTCIceCandidateInit[]>();
+
+  public onRemoteStreamChange(cb: (participantId: string, stream: MediaStream | null) => void) {
+    this.remoteStreamListeners.add(cb);
+    // Notify immediately of existing streams
+    this.remoteStreams.forEach((stream, pid) => {
+      cb(pid, stream);
+    });
+    return () => this.remoteStreamListeners.delete(cb);
+  }
+
   public participantId: string = '';
   public currentRoomId: string = '';
   public currentRole: ParticipantRole = 'participant';
@@ -31,35 +48,79 @@ export class SfuClient {
   public audioContext: AudioContext | null = null;
   public onRecordingChunk?: (totalBytes: number, totalChunks: number) => void;
 
+  private isExplicitlyDisconnected = false;
+  private reconnectAttempts = 0;
+  private reconnectTimeoutId: any = null;
+  private heartbeatIntervalId: any = null;
+  private lastJoinParams: { roomId: string; name: string; role: ParticipantRole } | null = null;
+
   constructor(callbacks: SfuClientCallbacks) {
     this.callbacks = callbacks;
   }
 
-  public connectSignaling(): Promise<void> {
+  public connectSignaling(isAutoReconnect = false): Promise<void> {
+    this.isExplicitlyDisconnected = false;
+    if (this.reconnectTimeoutId) {
+      clearTimeout(this.reconnectTimeoutId);
+      this.reconnectTimeoutId = null;
+    }
+
     return new Promise((resolve, reject) => {
       this.callbacks.onConnectionStatusChange?.('connecting');
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/ws`;
 
-      this.ws = new WebSocket(wsUrl);
+      let socket: WebSocket;
+      try {
+        socket = new WebSocket(wsUrl);
+      } catch (err: any) {
+        this.callbacks.onConnectionStatusChange?.('disconnected');
+        this.scheduleReconnect();
+        return reject(new Error(err?.message || 'Failed to initialize WebSocket'));
+      }
 
-      this.ws.onopen = () => {
+      this.ws = socket;
+      let isSettled = false;
+
+      socket.onopen = () => {
+        isSettled = true;
+        this.reconnectAttempts = 0;
         this.callbacks.onConnectionStatusChange?.('connected');
+        this.startHeartbeat();
+
+        // If this was an automatic reconnect and we previously had a room session, restore it seamlessly
+        if (isAutoReconnect && this.lastJoinParams) {
+          this.joinRoom(this.lastJoinParams.roomId, this.lastJoinParams.name, this.lastJoinParams.role)
+            .catch((e) => console.warn('[SFU Reconnect] Could not auto-restore room:', e));
+        }
+
         resolve();
       };
 
-      this.ws.onerror = (err) => {
+      socket.onerror = (_event) => {
+        this.stopHeartbeat();
         this.callbacks.onConnectionStatusChange?.('disconnected');
-        this.callbacks.onError?.('WebSocket connection error.');
-        reject(err);
+        if (!isSettled) {
+          isSettled = true;
+          this.scheduleReconnect();
+          reject(new Error('Signaling WebSocket connection failed to establish'));
+        }
       };
 
-      this.ws.onclose = () => {
+      socket.onclose = (_ev) => {
+        this.stopHeartbeat();
         this.callbacks.onConnectionStatusChange?.('disconnected');
+        if (!this.isExplicitlyDisconnected) {
+          this.scheduleReconnect();
+        }
+        if (!isSettled) {
+          isSettled = true;
+          reject(new Error('Signaling WebSocket connection closed unexpectedly'));
+        }
       };
 
-      this.ws.onmessage = (event) => {
+      socket.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data);
           this.handleSignalingMessage(message);
@@ -68,6 +129,40 @@ export class SfuClient {
         }
       };
     });
+  }
+
+  private startHeartbeat() {
+    this.stopHeartbeat();
+    this.heartbeatIntervalId = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send(JSON.stringify({ type: 'heartbeat', payload: { timestamp: Date.now() } }));
+        } catch {}
+      }
+    }, 15000);
+  }
+
+  private stopHeartbeat() {
+    if (this.heartbeatIntervalId) {
+      clearInterval(this.heartbeatIntervalId);
+      this.heartbeatIntervalId = null;
+    }
+  }
+
+  private scheduleReconnect() {
+    if (this.isExplicitlyDisconnected) return;
+    if (this.reconnectTimeoutId) return;
+
+    this.reconnectAttempts++;
+    const delay = Math.min(500 * Math.pow(1.5, Math.min(this.reconnectAttempts, 8)), 5000);
+    this.reconnectTimeoutId = setTimeout(() => {
+      this.reconnectTimeoutId = null;
+      if (!this.isExplicitlyDisconnected && (!this.ws || this.ws.readyState === WebSocket.CLOSED || this.ws.readyState === WebSocket.CLOSING)) {
+        this.connectSignaling(true).catch(() => {
+          // Handled by scheduleReconnect
+        });
+      }
+    }, delay);
   }
 
   private handleSignalingMessage(message: any) {
@@ -86,6 +181,15 @@ export class SfuClient {
         this.currentRole = payload.role;
         this.currentRoomId = payload.room.id;
         this.callbacks.onRoomJoined?.(payload);
+
+        // The newly joined participant initiates WebRTC peer connections to all existing participants in the room
+        if (payload.room && payload.room.participants) {
+          Object.keys(payload.room.participants).forEach((pid) => {
+            if (pid !== this.participantId) {
+              this.getOrCreatePeerConnection(pid, true);
+            }
+          });
+        }
         break;
 
       case 'room_state_updated':
@@ -94,10 +198,31 @@ export class SfuClient {
 
       case 'participant_joined':
         this.callbacks.onParticipantJoined?.(payload.participant);
+        if (payload.participant && payload.participant.id !== this.participantId) {
+          // Existing participants prepare the connection in responder mode (waiting for offer from new joiner)
+          this.getOrCreatePeerConnection(payload.participant.id, false);
+        }
         break;
 
       case 'participant_left':
-        this.callbacks.onParticipantLeft?.(payload.participantId);
+        const pid = payload.participantId;
+        if (this.peerConnections.has(pid)) {
+          try {
+            this.peerConnections.get(pid)!.close();
+          } catch {}
+          this.peerConnections.delete(pid);
+        }
+        this.iceCandidateQueues.delete(pid);
+        this.remoteStreams.delete(pid);
+        this.callbacks.onParticipantLeft?.(pid);
+        this.callbacks.onRemoteStreamRemoved?.(pid);
+        this.remoteStreamListeners.forEach((fn) => fn(pid, null));
+        break;
+
+      case 'peer_signal':
+        if (payload.senderId && payload.signal) {
+          this.handlePeerSignal(payload.senderId, payload.signal);
+        }
         break;
 
       case 'turn_state_changed':
@@ -116,6 +241,255 @@ export class SfuClient {
         this.callbacks.onError?.(payload.message || 'An error occurred.');
         break;
     }
+  }
+
+  // WebRTC Peer Connection negotiation for Real Multi-User Video
+  private getOrCreatePeerConnection(peerId: string, isInitiator: boolean): RTCPeerConnection {
+    if (this.peerConnections.has(peerId)) {
+      return this.peerConnections.get(peerId)!;
+    }
+
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+      ],
+    });
+
+    this.peerConnections.set(peerId, pc);
+
+    // Attach local stream tracks if available
+    if (this.localStream) {
+      this.localStream.getTracks().forEach((track) => {
+        try {
+          pc.addTrack(track, this.localStream!);
+        } catch {}
+      });
+    }
+
+    // Ensure transceivers exist for both audio and video
+    const hasAudioSender = pc.getSenders().some((s) => s.track && s.track.kind === 'audio');
+    const hasVideoSender = pc.getSenders().some((s) => s.track && s.track.kind === 'video');
+    if (!hasAudioSender) {
+      try { pc.addTransceiver('audio', { direction: 'sendrecv' }); } catch {}
+    }
+    if (!hasVideoSender) {
+      try { pc.addTransceiver('video', { direction: 'sendrecv' }); } catch {}
+    }
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate && this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(
+          JSON.stringify({
+            type: 'peer_signal',
+            roomId: this.currentRoomId,
+            senderId: this.participantId,
+            payload: {
+              targetId: peerId,
+              signal: { candidate: event.candidate.toJSON() },
+            },
+          }),
+        );
+      }
+    };
+
+    pc.ontrack = (event) => {
+      let stream = this.remoteStreams.get(peerId);
+      if (!stream) {
+        stream = event.streams && event.streams[0] ? event.streams[0] : new MediaStream();
+        this.remoteStreams.set(peerId, stream);
+      }
+      if (event.track && !stream.getTracks().includes(event.track)) {
+        stream.addTrack(event.track);
+      }
+      this.callbacks.onRemoteStream?.(peerId, stream);
+      this.remoteStreamListeners.forEach((fn) => fn(peerId, stream));
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        this.remoteStreams.delete(peerId);
+        this.iceCandidateQueues.delete(peerId);
+        this.callbacks.onRemoteStreamRemoved?.(peerId);
+        this.remoteStreamListeners.forEach((fn) => fn(peerId, null));
+      }
+    };
+
+    if (isInitiator) {
+      // Create offer with both audio and video enabled
+      pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true })
+        .then(async (offer) => {
+          await pc.setLocalDescription(offer);
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(
+              JSON.stringify({
+                type: 'peer_signal',
+                roomId: this.currentRoomId,
+                senderId: this.participantId,
+                payload: {
+                  targetId: peerId,
+                  signal: { description: pc.localDescription },
+                },
+              }),
+            );
+          }
+        })
+        .catch((err) => console.error('Error creating WebRTC offer:', err));
+    }
+
+    return pc;
+  }
+
+  private async handlePeerSignal(senderId: string, signal: any) {
+    if (!senderId) return;
+    const pc = this.getOrCreatePeerConnection(senderId, false);
+
+    if (signal.description) {
+      try {
+        const desc = new RTCSessionDescription(signal.description);
+        await pc.setRemoteDescription(desc);
+
+        // Drain any ICE candidates that arrived before the remote description was applied
+        const queue = this.iceCandidateQueues.get(senderId) || [];
+        while (queue.length > 0) {
+          const cand = queue.shift()!;
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(cand));
+          } catch (candErr) {
+            console.warn('Error adding queued ICE candidate:', candErr);
+          }
+        }
+        this.iceCandidateQueues.set(senderId, []);
+
+        if (desc.type === 'offer') {
+          // Attach current local tracks if not already attached
+          if (this.localStream) {
+            const senders = pc.getSenders();
+            this.localStream.getTracks().forEach((track) => {
+              const existing = senders.find((s) => s.track && s.track.kind === track.kind);
+              if (!existing) {
+                try { pc.addTrack(track, this.localStream!); } catch {}
+              }
+            });
+          }
+
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(
+              JSON.stringify({
+                type: 'peer_signal',
+                roomId: this.currentRoomId,
+                senderId: this.participantId,
+                payload: {
+                  targetId: senderId,
+                  signal: { description: pc.localDescription },
+                },
+              }),
+            );
+          }
+        }
+      } catch (e) {
+        console.error('Error handling WebRTC description:', e);
+      }
+    } else if (signal.candidate) {
+      if (!pc.remoteDescription) {
+        // Buffer candidate until remote description is set
+        if (!this.iceCandidateQueues.has(senderId)) {
+          this.iceCandidateQueues.set(senderId, []);
+        }
+        this.iceCandidateQueues.get(senderId)!.push(signal.candidate);
+      } else {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+        } catch (e) {
+          console.warn('Error adding ICE candidate:', e);
+        }
+      }
+    }
+  }
+
+  // Update existing peer connections when local stream is refreshed
+  public updateTracksInPeers() {
+    if (!this.localStream) return;
+    this.peerConnections.forEach((pc) => {
+      const senders = pc.getSenders();
+      this.localStream!.getTracks().forEach((track) => {
+        const existingSender = senders.find((s) => s.track && s.track.kind === track.kind);
+        if (existingSender) {
+          existingSender.replaceTrack(track).catch(() => {});
+        } else {
+          try {
+            pc.addTrack(track, this.localStream!);
+          } catch {}
+        }
+      });
+    });
+  }
+
+  // Direct Hardware Controls: Enable or Disable Audio / Video Tracks
+  public setAudioEnabled(enabled: boolean): boolean {
+    if (!this.localStream) return false;
+    const tracks = this.localStream.getAudioTracks();
+    tracks.forEach((t) => { t.enabled = enabled; });
+    return enabled;
+  }
+
+  public setVideoEnabled(enabled: boolean): boolean {
+    if (!this.localStream) return false;
+    const tracks = this.localStream.getVideoTracks();
+    tracks.forEach((t) => { t.enabled = enabled; });
+    return enabled;
+  }
+
+  // Conference room controls: Toggle Audio / Video and broadcast status
+  public toggleAudio(forceState?: boolean): boolean {
+    if (!this.localStream) return false;
+    const tracks = this.localStream.getAudioTracks();
+    const currentTrack = tracks[0];
+    const newState = forceState !== undefined ? forceState : (currentTrack ? !currentTrack.enabled : false);
+    tracks.forEach((t) => { t.enabled = newState; });
+
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({
+        type: 'update_media_state',
+        roomId: this.currentRoomId,
+        senderId: this.participantId,
+        payload: { isMuted: !newState },
+      }));
+    }
+    return newState;
+  }
+
+  public toggleVideo(forceState?: boolean): boolean {
+    if (!this.localStream) return false;
+    const tracks = this.localStream.getVideoTracks();
+    const currentTrack = tracks[0];
+    const newState = forceState !== undefined ? forceState : (currentTrack ? !currentTrack.enabled : false);
+    tracks.forEach((t) => { t.enabled = newState; });
+
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({
+        type: 'update_media_state',
+        roomId: this.currentRoomId,
+        senderId: this.participantId,
+        payload: { isVideoMuted: !newState },
+      }));
+    }
+    return newState;
+  }
+
+  public isAudioMuted(): boolean {
+    if (!this.localStream) return true;
+    const track = this.localStream.getAudioTracks()[0];
+    return track ? !track.enabled : true;
+  }
+
+  public isVideoMuted(): boolean {
+    if (!this.localStream) return true;
+    const track = this.localStream.getVideoTracks()[0];
+    return track ? !track.enabled : true;
   }
 
   public sendRequest<T = any>(type: string, payload: any = {}): Promise<T> {
@@ -160,8 +534,23 @@ export class SfuClient {
     }
   }
 
+  // Ensure local media stream is acquired with audio and video tracks
+  public async ensureLocalMediaStream(): Promise<MediaStream> {
+    if (this.localStream && this.localStream.active && this.localStream.getTracks().length > 0) {
+      return this.localStream;
+    }
+    return await this.getLocalMediaStream();
+  }
+
   public async joinRoom(roomId: string, name: string, role: ParticipantRole = 'controller'): Promise<void> {
     this.currentRoomId = roomId;
+    this.lastJoinParams = { roomId, name, role };
+    // Pre-acquire local media stream so tracks are ready when peer connections initiate
+    try {
+      await this.ensureLocalMediaStream();
+    } catch (e) {
+      console.warn('Could not pre-acquire media stream before joinRoom:', e);
+    }
     await this.initMediasoupDevice();
     await this.sendRequest('join_room', { name, role });
   }
@@ -489,7 +878,10 @@ export class SfuClient {
   }
 
   // Meeting Controller Authorization Actions (Feature 8.a)
-  public async executeControllerAction(action: 'mute' | 'unmute' | 'kick' | 'make_controller' | 'lock_room' | 'unlock_room', targetParticipantId?: string) {
+  public async executeControllerAction(
+    action: 'mute' | 'unmute' | 'kick' | 'make_controller' | 'lock_room' | 'unlock_room' | 'mute_all' | 'unmute_all' | 'reclaim_host',
+    targetParticipantId?: string,
+  ) {
     return await this.sendRequest('controller_action', { action, targetParticipantId });
   }
 
@@ -543,11 +935,19 @@ export class SfuClient {
   }
 
   public disconnect() {
+    this.isExplicitlyDisconnected = true;
+    if (this.reconnectTimeoutId) {
+      clearTimeout(this.reconnectTimeoutId);
+      this.reconnectTimeoutId = null;
+    }
+    this.stopHeartbeat();
     if (this.localStream) {
       this.localStream.getTracks().forEach((t) => t.stop());
     }
     if (this.ws) {
-      this.ws.close();
+      try {
+        this.ws.close();
+      } catch {}
       this.ws = null;
     }
     this.callbacks.onConnectionStatusChange?.('disconnected');

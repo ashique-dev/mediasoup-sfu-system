@@ -51,6 +51,8 @@ export type SignalingMessageType =
   | 'avatar_speech_chunk'
   | 'avatar_speech_complete'
   | 'controller_action'
+  | 'peer_signal'
+  | 'update_media_state'
   | 'error';
 
 export interface SignalingMessage<T = any> {
@@ -62,7 +64,7 @@ export interface SignalingMessage<T = any> {
 }
 
 export interface ControllerActionPayload {
-  action: 'mute' | 'unmute' | 'kick' | 'make_controller' | 'lock_room' | 'unlock_room';
+  action: 'mute' | 'unmute' | 'kick' | 'make_controller' | 'lock_room' | 'unlock_room' | 'mute_all' | 'unmute_all' | 'reclaim_host';
   targetParticipantId?: string;
 }
 

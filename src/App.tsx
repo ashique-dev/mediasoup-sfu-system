@@ -20,7 +20,14 @@ import { RecordingsList } from './components/RecordingsList';
 import { ArchitectureDocs } from './components/ArchitectureDocs';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'studio' | 'room' | 'recordings' | 'architecture'>('studio');
+  const [activeTab, setActiveTab] = useState<'studio' | 'room' | 'recordings' | 'architecture'>(() => {
+    const params = new URLSearchParams(window.location.search);
+    const tab = params.get('tab');
+    if (tab === 'room' || tab === 'studio' || tab === 'recordings' || tab === 'architecture') {
+      return tab;
+    }
+    return 'studio';
+  });
   const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected'>('connecting');
   const [roomState, setRoomState] = useState<RoomState | null>(null);
   const [userRole, setUserRole] = useState<ParticipantRole>('controller');
@@ -64,13 +71,26 @@ export default function App() {
 
     sfuClientRef.current = client;
 
-    // Connect signaling and join default meeting room automatically
-    client
-      .connectSignaling()
-      .then(async () => {
-        await client.joinRoom('main-sfu-room', 'Dev Engineer', 'controller');
-      })
-      .catch((err) => console.error('Signaling connection error:', err));
+    // Determine initial room, user name, and role from URL or storage
+    const urlParams = new URLSearchParams(window.location.search);
+    const roomParam = urlParams.get('room') || 'main-sfu-room';
+    let storedName = sessionStorage.getItem('sfu_username');
+    if (!storedName) {
+      storedName = urlParams.get('name') || (window.location.search.includes('name=') ? urlParams.get('name')! : 'Dev Engineer');
+      sessionStorage.setItem('sfu_username', storedName);
+    }
+    const roleParam = (urlParams.get('role') as any) || 'controller';
+
+    // Connect signaling and join default meeting room automatically with auto-reconnect fallback
+    const connectAndJoin = async () => {
+      try {
+        await client.connectSignaling();
+        await client.joinRoom(roomParam, storedName!, roleParam);
+      } catch (err: any) {
+        console.warn('Initial signaling connection attempt deferred to auto-reconnect:', err?.message || err);
+      }
+    };
+    connectAndJoin();
 
     // Refresh recordings count
     fetchRecordingsCount();
@@ -146,10 +166,14 @@ export default function App() {
                   <span className="text-amber-400 font-mono">Connecting...</span>
                 </>
               ) : (
-                <>
+                <button
+                  onClick={() => sfuClientRef.current?.connectSignaling(true)}
+                  className="flex items-center gap-1.5 hover:opacity-80 transition cursor-pointer"
+                  title="Click to reconnect signaling"
+                >
                   <span className="w-2 h-2 rounded-full bg-red-400" />
-                  <span className="text-red-400 font-mono">Offline</span>
-                </>
+                  <span className="text-red-400 font-mono underline underline-offset-2">Offline (Reconnect)</span>
+                </button>
               )}
             </div>
 
@@ -241,7 +265,7 @@ export default function App() {
             )}
 
             {activeTab === 'recordings' && (
-              <RecordingsList />
+              <RecordingsList onRecordingsChanged={fetchRecordingsCount} />
             )}
 
             {activeTab === 'architecture' && (

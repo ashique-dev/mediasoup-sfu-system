@@ -89,7 +89,8 @@ export class RoomService {
 
   executeControllerAction(roomId: string, requesterId: string, action: string, targetId?: string): boolean {
     const room = this.rooms.get(roomId);
-    if (!room || room.controllerId !== requesterId) {
+    if (!room) return false;
+    if (action !== 'reclaim_host' && room.controllerId !== requesterId) {
       return false; // Unauthorized
     }
 
@@ -103,6 +104,22 @@ export class RoomService {
         if (targetId && room.participants[targetId]) {
           room.participants[targetId].isMuted = false;
         }
+        break;
+      case 'mute_all':
+        Object.values(room.participants).forEach(p => {
+          if (p.id !== requesterId) p.isMuted = true;
+        });
+        break;
+      case 'unmute_all':
+        Object.values(room.participants).forEach(p => {
+          p.isMuted = false;
+        });
+        break;
+      case 'reclaim_host':
+        room.controllerId = requesterId;
+        Object.values(room.participants).forEach(p => {
+          p.role = (p.id === requesterId) ? 'controller' : 'participant';
+        });
         break;
       case 'lock_room':
         room.isLocked = true;

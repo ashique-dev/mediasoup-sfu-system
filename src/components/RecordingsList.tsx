@@ -17,11 +17,17 @@ import {
 } from 'lucide-react';
 import { SavedRecording } from '../types';
 
-export const RecordingsList: React.FC = () => {
+interface RecordingsListProps {
+  onRecordingsChanged?: () => void;
+}
+
+export const RecordingsList: React.FC<RecordingsListProps> = ({ onRecordingsChanged }) => {
   const [recordings, setRecordings] = useState<SavedRecording[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedRecording, setSelectedRecording] = useState<SavedRecording | null>(null);
   const [videoPlaybackError, setVideoPlaybackError] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const fetchRecordings = async () => {
     setIsLoading(true);
@@ -43,15 +49,24 @@ export const RecordingsList: React.FC = () => {
   }, []);
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this recording from the project local directory?')) return;
+    setIsDeleting(true);
     try {
       const res = await fetch(`/api/recordings/${id}`, { method: 'DELETE' });
       if (res.ok) {
         setRecordings((prev) => prev.filter((r) => r.id !== id));
-        if (selectedRecording?.id === id) setSelectedRecording(null);
+        if (selectedRecording?.id === id) {
+          setSelectedRecording(null);
+        }
+        setConfirmDeleteId(null);
+        onRecordingsChanged?.();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        console.error('Failed to delete recording:', data.error || res.statusText);
       }
     } catch (err) {
       console.error('Error deleting recording:', err);
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -180,13 +195,33 @@ export const RecordingsList: React.FC = () => {
                   </a>
                 )}
 
-                <button
-                  onClick={() => handleDelete(rec.id)}
-                  className="p-2 rounded-xl bg-slate-800 hover:bg-red-950/60 text-slate-400 hover:text-red-400 transition"
-                  title="Delete recording from local disk"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
+                {confirmDeleteId === rec.id ? (
+                  <div className="flex items-center gap-1.5 bg-red-950 border border-red-800 px-2 py-1 rounded-xl">
+                    <span className="text-[11px] font-medium text-red-300">Delete?</span>
+                    <button
+                      onClick={() => handleDelete(rec.id)}
+                      disabled={isDeleting}
+                      className="px-2 py-0.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-[11px] font-semibold transition cursor-pointer"
+                    >
+                      {isDeleting ? '...' : 'Yes'}
+                    </button>
+                    <button
+                      onClick={() => setConfirmDeleteId(null)}
+                      disabled={isDeleting}
+                      className="px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] transition cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setConfirmDeleteId(rec.id)}
+                    className="p-2 rounded-xl bg-slate-800 hover:bg-red-950/60 text-slate-400 hover:text-red-400 transition cursor-pointer"
+                    title="Delete recording from local disk"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
             </div>
           ))}
@@ -234,13 +269,33 @@ export const RecordingsList: React.FC = () => {
                     </ol>
                   </div>
                   <div className="flex items-center justify-between pt-1">
-                    <button
-                      onClick={() => handleDelete(selectedRecording.id)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-950 border border-red-800/60 text-red-300 hover:bg-red-900 text-xs font-semibold transition"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>Delete This Empty File</span>
-                    </button>
+                    {confirmDeleteId === selectedRecording.id ? (
+                      <div className="flex items-center gap-2 bg-red-950/90 border border-red-800 px-3 py-1.5 rounded-lg">
+                        <span className="text-xs text-red-300 font-medium">Permanently delete empty file?</span>
+                        <button
+                          onClick={() => handleDelete(selectedRecording.id)}
+                          disabled={isDeleting}
+                          className="px-2.5 py-1 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-semibold cursor-pointer"
+                        >
+                          {isDeleting ? 'Deleting...' : 'Yes, Delete'}
+                        </button>
+                        <button
+                          onClick={() => setConfirmDeleteId(null)}
+                          disabled={isDeleting}
+                          className="px-2.5 py-1 rounded-lg bg-slate-800 text-slate-300 text-xs cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmDeleteId(selectedRecording.id)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-950 border border-red-800/60 text-red-300 hover:bg-red-900 text-xs font-semibold transition cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Delete This Empty File</span>
+                      </button>
+                    )}
                     <span className="text-[11px] text-slate-400 font-mono">File: {selectedRecording.videoFileName}</span>
                   </div>
                 </div>
@@ -309,33 +364,65 @@ export const RecordingsList: React.FC = () => {
             </div>
 
             {/* Download & Close actions */}
-            <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
-              {selectedRecording.videoFileName && (
-                <a
-                  href={`/api/recordings/download/${selectedRecording.videoFileName}`}
-                  download
-                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-sky-600 hover:bg-sky-500 text-white transition"
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-800">
+              <div>
+                {confirmDeleteId === selectedRecording.id ? (
+                  <div className="flex items-center gap-2 bg-red-950/90 border border-red-800 px-3 py-1.5 rounded-xl">
+                    <span className="text-xs text-red-300 font-medium">Delete from disk?</span>
+                    <button
+                      onClick={() => handleDelete(selectedRecording.id)}
+                      disabled={isDeleting}
+                      className="px-2.5 py-1 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-semibold cursor-pointer"
+                    >
+                      {isDeleting ? 'Deleting...' : 'Yes, Delete'}
+                    </button>
+                    <button
+                      onClick={() => setConfirmDeleteId(null)}
+                      disabled={isDeleting}
+                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setConfirmDeleteId(selectedRecording.id)}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-red-950/60 border border-red-800/50 text-red-300 hover:bg-red-900 transition cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete Recording</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                {selectedRecording.videoFileName && (
+                  <a
+                    href={`/api/recordings/download/${selectedRecording.videoFileName}`}
+                    download
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-sky-600 hover:bg-sky-500 text-white transition"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Download Video</span>
+                  </a>
+                )}
+                {selectedRecording.transcriptFileName && (
+                  <a
+                    href={`/api/recordings/download/${selectedRecording.transcriptFileName}`}
+                    download
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-purple-600 hover:bg-purple-500 text-white transition"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Download Transcript</span>
+                  </a>
+                )}
+                <button
+                  onClick={() => setSelectedRecording(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700 cursor-pointer"
                 >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>Download Video ({selectedRecording.videoFileName})</span>
-                </a>
-              )}
-              {selectedRecording.transcriptFileName && (
-                <a
-                  href={`/api/recordings/download/${selectedRecording.transcriptFileName}`}
-                  download
-                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-purple-600 hover:bg-purple-500 text-white transition"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>Download Transcript</span>
-                </a>
-              )}
-              <button
-                onClick={() => setSelectedRecording(null)}
-                className="px-4 py-2 rounded-xl text-xs font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700"
-              >
-                Close
-              </button>
+                  Close
+                </button>
+              </div>
             </div>
           </div>
         </div>

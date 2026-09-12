@@ -416,11 +416,52 @@ app.get('/api/recordings/download/:filename', (req, res) => {
 });
 
 // --- WebSocket Signaling Server for SFU & Room Controller ---
-const wss = new WebSocketServer({ server, path: '/ws' });
+const wss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (req, socket, head) => {
+  let pathname = '';
+  try {
+    const parsedUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
+    pathname = parsedUrl.pathname;
+  } catch {
+    pathname = req.url || '';
+  }
+
+  // Intercept all websocket requests targeting /ws (with or without trailing slash or query params)
+  if (pathname === '/ws' || pathname === '/ws/' || pathname.startsWith('/ws')) {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req);
+    });
+  } else {
+    socket.destroy();
+  }
+});
+
+// Periodic ping to keep Cloud Run / reverse proxy connections alive
+const pingInterval = setInterval(() => {
+  wss.clients.forEach((ws: any) => {
+    if (ws.isAlive === false) {
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    try {
+      ws.ping();
+    } catch {}
+  });
+}, 25000);
+
+wss.on('close', () => {
+  clearInterval(pingInterval);
+});
 
 wss.on('connection', (ws: WebSocket) => {
   const clientId = uuidv4();
+  (ws as any).isAlive = true;
   clients.set(clientId, { ws });
+
+  ws.on('pong', () => {
+    (ws as any).isAlive = true;
+  });
 
   ws.on('message', async (data: string) => {
     try {
@@ -440,6 +481,13 @@ wss.on('connection', (ws: WebSocket) => {
       };
 
       switch (type) {
+        case 'ping':
+        case 'heartbeat': {
+          (ws as any).isAlive = true;
+          reply('pong', { timestamp: Date.now() });
+          break;
+        }
+
         case 'get_router_capabilities': {
           reply('router_capabilities', { rtpCapabilities: routerRtpCapabilities });
           break;
@@ -713,18 +761,68 @@ wss.on('connection', (ws: WebSocket) => {
           break;
         }
 
+        // Peer-to-Peer WebRTC track relay for real multi-participant video
+        case 'peer_signal': {
+          const activeRoomId = roomId || clients.get(clientId)?.roomId || 'main-sfu-room';
+          const { targetId, signal } = payload;
+          if (targetId && clients.has(targetId)) {
+            const targetClient = clients.get(targetId);
+            if (targetClient && targetClient.ws.readyState === WebSocket.OPEN) {
+              targetClient.ws.send(JSON.stringify({
+                type: 'peer_signal',
+                roomId: activeRoomId,
+                senderId: clientId,
+                payload: { senderId: clientId, signal },
+              }));
+            }
+          }
+          break;
+        }
+
+        // Real-time media device status toggle (mute/unmute mic & cam)
+        case 'update_media_state': {
+          const activeRoomId = roomId || clients.get(clientId)?.roomId || 'main-sfu-room';
+          const room = getOrCreateRoom(activeRoomId);
+          if (room.participants[clientId]) {
+            if (typeof payload.isMuted === 'boolean') {
+              room.participants[clientId].isMuted = payload.isMuted;
+            }
+            if (typeof payload.isVideoMuted === 'boolean') {
+              room.participants[clientId].isVideoMuted = payload.isVideoMuted;
+            }
+          }
+          broadcastToRoom(room.id, {
+            type: 'room_state_updated',
+            roomId: room.id,
+            payload: {
+              room: {
+                id: room.id,
+                name: room.name,
+                controllerId: room.controllerId,
+                isLocked: room.isLocked,
+                participants: room.participants,
+                turnState: room.turnState,
+                activeSpeakerId: room.activeSpeakerId,
+              },
+            },
+          });
+          reply('media_state_updated', { success: true });
+          break;
+        }
+
         // Meeting Controller Authorization Action (Requirement 8.a)
         case 'controller_action': {
-          const room = getOrCreateRoom(roomId);
+          const activeRoomId = roomId || clients.get(clientId)?.roomId || 'main-sfu-room';
+          const room = getOrCreateRoom(activeRoomId);
           const currentParticipant = room.participants[clientId];
 
-          // Authorization verification: only controllers can execute controller actions
-          if (!currentParticipant || currentParticipant.role !== 'controller') {
+          // Authorization verification: only controllers can execute controller actions,
+          // with the exception of 'reclaim_host' if host was delegated in testing
+          const { action, targetParticipantId } = payload;
+          if (action !== 'reclaim_host' && (!currentParticipant || currentParticipant.role !== 'controller')) {
             reply('error', { message: 'Authorization Failed: Only Meeting Controllers can perform this action.' });
             return;
           }
-
-          const { action, targetParticipantId } = payload;
 
           switch (action) {
             case 'mute':
@@ -736,6 +834,22 @@ wss.on('connection', (ws: WebSocket) => {
               if (targetParticipantId && room.participants[targetParticipantId]) {
                 room.participants[targetParticipantId].isMuted = false;
               }
+              break;
+            case 'mute_all':
+              Object.values(room.participants).forEach(p => {
+                if (p.id !== clientId) p.isMuted = true;
+              });
+              break;
+            case 'unmute_all':
+              Object.values(room.participants).forEach(p => {
+                p.isMuted = false;
+              });
+              break;
+            case 'reclaim_host':
+              room.controllerId = clientId;
+              Object.values(room.participants).forEach(p => {
+                p.role = (p.id === clientId) ? 'controller' : 'participant';
+              });
               break;
             case 'lock_room':
               room.isLocked = true;
@@ -780,6 +894,7 @@ wss.on('connection', (ws: WebSocket) => {
               },
             },
           });
+          reply('controller_action_result', { success: true, action });
           break;
         }
       }
