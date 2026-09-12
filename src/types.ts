@@ -83,6 +83,7 @@ export interface SavedRecording {
   transcriptFileName: string;
   durationSeconds: number;
   fileSizeBytes: number;
+  isEmpty?: boolean;
   createdAt: string;
   videoUrl: string;
   transcriptUrl: string;

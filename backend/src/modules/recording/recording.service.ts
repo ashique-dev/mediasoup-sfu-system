@@ -84,12 +84,24 @@ export class RecordingService {
       .filter((f) => f.endsWith('-meta.json'))
       .map((f) => {
         try {
-          return JSON.parse(fs.readFileSync(path.join(this.storageDir, f), 'utf-8'));
+          const item = JSON.parse(fs.readFileSync(path.join(this.storageDir, f), 'utf-8'));
+          if (item && item.videoFileName) {
+            const vp = path.join(this.storageDir, item.videoFileName);
+            if (fs.existsSync(vp)) {
+              const stat = fs.statSync(vp);
+              item.fileSizeBytes = stat.size;
+            } else {
+              item.fileSizeBytes = 0;
+            }
+          }
+          item.isEmpty = !item.fileSizeBytes || item.fileSizeBytes === 0;
+          return item;
         } catch {
           return null;
         }
       })
-      .filter(Boolean);
+      .filter(Boolean)
+      .sort((a: any, b: any) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
   }
 
   deleteRecording(id: string) {

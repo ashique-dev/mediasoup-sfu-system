@@ -40,10 +40,15 @@ server {
         proxy_set_header Host $host;
     }
 
-    # Proxy recordings
+    # Proxy recordings with full HTTP Range & video streaming support
     location /recordings/ {
         proxy_pass http://backend:3001/recordings/;
+        proxy_http_version 1.1;
         proxy_set_header Host $host;
+        proxy_set_header Range $http_range;
+        proxy_set_header If-Range $http_if_range;
+        proxy_buffering off;
+        add_header Accept-Ranges bytes;
     }
 }
 EOF

@@ -11,6 +11,8 @@ import {
   RefreshCw,
   ExternalLink,
   CheckCircle2,
+  AlertTriangle,
+  Info,
   X
 } from 'lucide-react';
 import { SavedRecording } from '../types';
@@ -19,6 +21,7 @@ export const RecordingsList: React.FC = () => {
   const [recordings, setRecordings] = useState<SavedRecording[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedRecording, setSelectedRecording] = useState<SavedRecording | null>(null);
+  const [videoPlaybackError, setVideoPlaybackError] = useState(false);
 
   const fetchRecordings = async () => {
     setIsLoading(true);
@@ -119,7 +122,16 @@ export const RecordingsList: React.FC = () => {
                   </span>
                   <span>•</span>
                   <span>
-                    {rec.fileSizeBytes ? `${(rec.fileSizeBytes / (1024 * 1024)).toFixed(2)} MB` : 'Text only'}
+                    {rec.fileSizeBytes && rec.fileSizeBytes > 0 ? (
+                      <span className="text-emerald-400 font-semibold">
+                        {(rec.fileSizeBytes / (1024 * 1024)).toFixed(2)} MB
+                      </span>
+                    ) : (
+                      <span className="text-amber-400 font-semibold flex items-center gap-1">
+                        <AlertTriangle className="w-3.5 h-3.5" />
+                        0 B (Empty)
+                      </span>
+                    )}
                   </span>
                 </div>
 
@@ -143,14 +155,21 @@ export const RecordingsList: React.FC = () => {
               {/* Action buttons */}
               <div className="flex items-center justify-between gap-2 mt-5 pt-3 border-t border-slate-800">
                 <button
-                  onClick={() => setSelectedRecording(rec)}
-                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition"
+                  onClick={() => {
+                    setVideoPlaybackError(false);
+                    setSelectedRecording(rec);
+                  }}
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition ${
+                    rec.isEmpty || !rec.fileSizeBytes
+                      ? 'bg-amber-950/40 border border-amber-500/40 text-amber-300 hover:bg-amber-900/40'
+                      : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                  }`}
                 >
                   <Play className="w-3.5 h-3.5 fill-current" />
-                  <span>Inspect & Play</span>
+                  <span>{rec.isEmpty || !rec.fileSizeBytes ? 'Inspect (0 B)' : 'Inspect & Play'}</span>
                 </button>
 
-                {rec.videoFileName && (
+                {rec.videoFileName && rec.fileSizeBytes > 0 && (
                   <a
                     href={`/api/recordings/download/${rec.videoFileName}`}
                     download
@@ -193,15 +212,67 @@ export const RecordingsList: React.FC = () => {
               </button>
             </div>
 
-            {/* Video Player */}
+            {/* Video Player or Empty File Diagnostic */}
             {selectedRecording.videoUrl && (
-              <div className="aspect-video w-full rounded-xl overflow-hidden bg-black border border-slate-800 flex items-center justify-center">
-                <video
-                  src={selectedRecording.videoUrl}
-                  controls
-                  className="w-full h-full object-contain"
-                />
-              </div>
+              selectedRecording.isEmpty || !selectedRecording.fileSizeBytes || selectedRecording.fileSizeBytes === 0 ? (
+                <div className="p-4 rounded-xl border border-amber-500/40 bg-amber-950/30 flex flex-col gap-3 text-amber-200">
+                  <div className="flex items-center gap-2 font-semibold text-sm text-amber-300">
+                    <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0" />
+                    <span>Empty Recording File (0 bytes)</span>
+                  </div>
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    This video file was saved before any speech media or camera frames were captured by the browser recorder. Chromium and VLC cannot play 0-byte video streams and report <code className="text-amber-400 font-mono">HTTP 416 Range Not Satisfiable</code>.
+                  </p>
+                  <div className="p-3 rounded-lg bg-slate-950/80 border border-amber-500/20 text-xs text-slate-300 flex flex-col gap-1.5">
+                    <span className="font-semibold text-slate-200">How to capture a playable recording:</span>
+                    <ol className="list-decimal list-inside space-y-1 text-slate-400">
+                      <li>Open the <strong className="text-slate-200">Half-Duplex Studio</strong> tab.</li>
+                      <li>Click <strong className="text-sky-300">Start Speech Turn</strong> (camera and mic activate).</li>
+                      <li>Speak or let the camera feed run — verify the green <strong className="text-emerald-300">MB buffer indicator</strong> increases.</li>
+                      <li>Click <strong className="text-purple-300">Speech is Over, Now It's Your Turn</strong>.</li>
+                      <li>Click <strong className="text-indigo-300">Save to Local Directory</strong>.</li>
+                    </ol>
+                  </div>
+                  <div className="flex items-center justify-between pt-1">
+                    <button
+                      onClick={() => handleDelete(selectedRecording.id)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-950 border border-red-800/60 text-red-300 hover:bg-red-900 text-xs font-semibold transition"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Delete This Empty File</span>
+                    </button>
+                    <span className="text-[11px] text-slate-400 font-mono">File: {selectedRecording.videoFileName}</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  <div className="aspect-video w-full rounded-xl overflow-hidden bg-black border border-slate-800 flex items-center justify-center relative">
+                    <video
+                      key={selectedRecording.videoUrl}
+                      src={selectedRecording.videoUrl}
+                      controls
+                      playsInline
+                      preload="metadata"
+                      className="w-full h-full object-contain"
+                      onError={() => setVideoPlaybackError(true)}
+                    />
+                  </div>
+                  {videoPlaybackError && (
+                    <div className="flex items-center justify-between p-3 rounded-lg border border-red-500/40 bg-red-950/30 text-xs text-red-300">
+                      <span>Stream playback issue in iframe.</span>
+                      <a
+                        href={selectedRecording.videoUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="underline font-semibold flex items-center gap-1 text-red-200"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        <span>Open Stream in New Tab</span>
+                      </a>
+                    </div>
+                  )}
+                </div>
+              )
             )}
 
             {/* Transcript Viewer */}

@@ -170,8 +170,16 @@ export const HalfDuplexStudio: React.FC<HalfDuplexStudioProps> = ({
 
   // Save Video and Transcript to local directory (Requirement 8.b2)
   const handleSaveToLocalDirectory = async () => {
-    if (sfuClient.recordedChunks.length === 0 && recordedBytes === 0) {
-      alert('Please perform at least one speech turn with active camera/mic before saving. Click "Start Speech", speak, and then click "Speech Over" to capture video.');
+    const totalBytes = sfuClient.getTotalRecordedBytes();
+    if (totalBytes === 0 && sfuClient.recordedChunks.length === 0) {
+      alert(
+        '⚠️ Cannot save empty recording: 0 bytes of video/audio have been captured yet.\n\n' +
+        'To record a playable video:\n' +
+        '1. Click "Start Speech Turn"\n' +
+        '2. Allow camera/mic or let the animated stream run (watch the MB counter increase)\n' +
+        '3. Click "Speech is Over, Now It\'s Your Turn"\n' +
+        '4. Then click "Save to Local Directory"'
+      );
       return;
     }
 

@@ -33,7 +33,66 @@ const upload = multer({ storage, limits: { fileSize: 100 * 1024 * 1024 } });
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Serve recordings statically for playback and download
+// Serve recordings with robust HTTP 206 Partial Content video streaming & 0-byte protection
+app.use('/recordings/:filename', (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const filename = path.basename(req.params.filename);
+  const filePath = path.join(RECORDINGS_DIR, filename);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+
+  if (filename.endsWith('.json')) {
+    return res.sendFile(filePath);
+  }
+
+  try {
+    const stat = fs.statSync(filePath);
+    const fileSize = stat.size;
+
+    if (fileSize === 0) {
+      res.writeHead(200, {
+        'Content-Type': 'video/webm',
+        'Content-Length': '0',
+        'Accept-Ranges': 'bytes',
+        'X-Empty-File': 'true',
+      });
+      return res.end();
+    }
+
+    const range = req.headers.range;
+    if (range) {
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+      if (isNaN(start) || start >= fileSize || end >= fileSize || start > end) {
+        res.writeHead(416, { 'Content-Range': `bytes */${fileSize}` });
+        return res.end();
+      }
+
+      const chunkSize = end - start + 1;
+      const fileStream = fs.createReadStream(filePath, { start, end });
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunkSize,
+        'Content-Type': filename.endsWith('.mp4') ? 'video/mp4' : 'video/webm',
+      });
+      fileStream.pipe(res);
+    } else {
+      res.writeHead(200, {
+        'Content-Length': fileSize,
+        'Content-Type': filename.endsWith('.mp4') ? 'video/mp4' : 'video/webm',
+        'Accept-Ranges': 'bytes',
+      });
+      fs.createReadStream(filePath).pipe(res);
+    }
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.use('/recordings', express.static(RECORDINGS_DIR));
 
 // Standard mediasoup router RTP capabilities
@@ -218,6 +277,13 @@ app.post('/api/recordings/save', upload.single('video'), (req, res) => {
     const videoFile = req.file;
     const { roomId, transcriptJson, title, duration } = req.body;
 
+    if (videoFile && videoFile.size === 0) {
+      if (fs.existsSync(videoFile.path)) {
+        try { fs.unlinkSync(videoFile.path); } catch {}
+      }
+      return res.status(400).json({ error: 'Uploaded video file is empty (0 bytes). Please capture speech before saving.' });
+    }
+
     const id = uuidv4();
     const timestamp = new Date().toISOString();
     const safeTitle = title || `Recording_${new Date().toLocaleDateString().replace(/\//g, '-')}`;
@@ -291,7 +357,17 @@ app.get('/api/recordings', (_req, res) => {
       .map(metaFile => {
         try {
           const content = fs.readFileSync(path.join(RECORDINGS_DIR, metaFile), 'utf-8');
-          return JSON.parse(content);
+          const item = JSON.parse(content);
+          if (item && item.videoFileName) {
+            const vp = path.join(RECORDINGS_DIR, item.videoFileName);
+            if (fs.existsSync(vp)) {
+              item.fileSizeBytes = fs.statSync(vp).size;
+            } else {
+              item.fileSizeBytes = 0;
+            }
+          }
+          item.isEmpty = !item.fileSizeBytes || item.fileSizeBytes === 0;
+          return item;
         } catch {
           return null;
         }
